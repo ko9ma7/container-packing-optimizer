@@ -122,52 +122,90 @@ function candidatePoints(placements,bounds,gap,verticalGap){
   return [...uniq.values()].sort((a,b)=>a.z-b.z||a.y-b.y||a.x-b.x)
 }
 
+function orientationFlex(unit){
+  const r=resolvedOrientationRules(unit)
+  return Number(r.rotate90)+Number(r.layWidth)*2+Number(r.layLength)*2
+}
 function sortingVariants(units){
   const volume=u=>u.length*u.width*u.height,area=u=>u.length*u.width
+  const supportersFirst=[...units].sort((a,b)=>{
+    const ar=(a.canSupportCargo?0:a.canBeStacked?2:1),br=(b.canSupportCargo?0:b.canBeStacked?2:1)
+    return ar-br||area(b)-area(a)||volume(b)-volume(a)||orientationFlex(a)-orientationFlex(b)
+  })
+  const inflexibleFirst=[...units].sort((a,b)=>orientationFlex(a)-orientationFlex(b)||area(b)-area(a)||volume(b)-volume(a))
   const variants=[
-    [...units].sort((a,b)=>volume(b)-volume(a)||b.weightKg-a.weightKg),
-    [...units].sort((a,b)=>area(b)-area(a)||Math.max(b.length,b.width)-Math.max(a.length,a.width)),
-    [...units].sort((a,b)=>Math.max(b.length,b.width)-Math.max(a.length,a.width)||area(b)-area(a)),
-    [...units].sort((a,b)=>b.height-a.height||area(b)-area(a)),
+    {ordered:supportersFirst,mode:'cadStack'},
+    {ordered:[...units].sort((a,b)=>volume(b)-volume(a)||b.weightKg-a.weightKg),mode:'balanced'},
+    {ordered:[...units].sort((a,b)=>area(b)-area(a)||Math.max(b.length,b.width)-Math.max(a.length,a.width)),mode:'balanced'},
+    {ordered:[...units].sort((a,b)=>Math.max(b.length,b.width)-Math.max(a.length,a.width)||area(b)-area(a)),mode:'compact'},
+    {ordered:[...units].sort((a,b)=>b.height-a.height||area(b)-area(a)),mode:'compact'},
+    {ordered:inflexibleFirst,mode:'cadStack'},
   ]
-  // A type-balanced order prevents one large repeated type from monopolizing the
-  // first container and leaving an unnecessarily large residual container.
   const groups=new Map()
   units.forEach(u=>{if(!groups.has(u.cargoId))groups.set(u.cargoId,[]);groups.get(u.cargoId).push(u)})
-  const keys=[...groups.keys()].sort((a,b)=>groups.get(a).length-groups.get(b).length)
+  const keys=[...groups.keys()].sort((a,b)=>{
+    const aa=groups.get(a)[0],bb=groups.get(b)[0]
+    return (bb.canSupportCargo?1:0)-(aa.canSupportCargo?1:0)||area(bb)-area(aa)||groups.get(a).length-groups.get(b).length
+  })
   const rr=[];let more=true
   while(more){more=false;for(const k of keys){const arr=groups.get(k);if(arr.length){rr.push(arr.shift());more=true}}}
-  if(rr.length)variants.push(rr)
+  if(rr.length)variants.push({ordered:rr,mode:'cadStack'})
   return variants
 }
 
-function placeUnitsOrdered(units,dims,settings,nestedInsideUid){
+function validCandidate(placements,lookup,unit,point,o,dims,bounds,settings,gap,verticalGap){
+  if(dims.doorWidth&&dims.doorHeight){
+    const pass=Math.max(0,Number(settings.doorPassClearance||0))
+    const clearDoorW=Math.max(0,Number(dims.doorWidth)-pass*2),clearDoorH=Math.max(0,Number(dims.doorHeight)-pass)
+    if(o.width>clearDoorW+EPS||o.height>clearDoorH+EPS)return null
+  }
+  if(point.x<bounds.minX-EPS||point.y<bounds.minY-EPS||point.z<bounds.minZ-EPS)return null
+  if(point.x+o.length>bounds.maxX+EPS||point.y+o.width>bounds.maxY+EPS||point.z+o.height>bounds.maxZ+EPS)return null
+  if(placements.some(p=>intersects(p,point.x,point.y,point.z,o.length,o.width,o.height,gap,verticalGap)))return null
+  const support=supportInfoAt(placements,lookup,unit,point.x,point.y,point.z,o.length,o.width,bounds,verticalGap)
+  if(support.ratio+EPS<Number(settings.supportRatio||0)||!support.ok)return null
+  return support
+}
+
+function candidateScore(unit,point,o,support,bounds,gap,mode){
+  const onStack=point.z>bounds.minZ+EPS
+  const xEnd=point.x+o.length,yEnd=point.y+o.width,zEnd=point.z+o.height
+  const compact=(point.z-bounds.minZ)*1_000_000+(point.y-bounds.minY)*1_000+(point.x-bounds.minX)
+  const residual=(bounds.maxX-xEnd)+(bounds.maxY-yEnd)+(bounds.maxZ-zEnd)*.12
+  const edgeBonus=(Math.abs(point.x-bounds.minX)<1||Math.abs(point.y-bounds.minY)<1)?-20:0
+  const availX=bounds.maxX-point.x,availY=bounds.maxY-point.y
+  const repeatX=Math.max(0,Math.floor((availX+gap)/(o.length+gap)))
+  const repeatY=Math.max(0,Math.floor((availY+gap)/(o.width+gap)))
+  const tilePotential=repeatX*repeatY
+  let stackBias=0
+  if(mode==='cadStack'&&unit.canBeStacked){
+    stackBias=onStack?-2_000_000_000:600_000_000
+  }else if(mode==='balanced'&&unit.canBeStacked&&onStack){
+    stackBias=-250_000_000
+  }
+  if(unit.canSupportCargo&&onStack&&!unit.canBeStacked)stackBias+=3_000_000_000
+  const heightPenalty=zEnd*50
+  const futureStackHeightPenalty=(mode==='cadStack'&&unit.canBeStacked&&unit.canSupportCargo&&!onStack)?o.height*500_000:0
+  const minOrientationWidth=Math.min(...orientations(unit).map(x=>x.width))
+  const remainingStripY=bounds.maxY-(point.y+o.width+gap)
+  const mixedStripBonus=(mode==='cadStack'&&unit.canBeStacked&&unit.canSupportCargo&&!onStack&&remainingStripY+EPS>=minOrientationWidth)?-700_000_000:0
+  const supportBonus=onStack?-(Math.min(1,support.ratio||0)*100_000):0
+  return stackBias+compact+residual+heightPenalty+futureStackHeightPenalty+mixedStripBonus+edgeBonus+supportBonus-tilePotential*100_000
+}
+
+function placeUnitsOrdered(units,dims,settings,nestedInsideUid,mode='balanced'){
   const placements=[],unpacked=[];let usedWeightKg=0
   const lookup=new Map(units.map(u=>[u.uid,u])), bounds=boundsFor(dims,settings)
   const gap=Math.max(0,Number(settings.itemGap||0)), verticalGap=Math.max(0,Number(settings.verticalGap||0))
   for(const unit of units){
     if(usedWeightKg+unit.weightKg>Number(dims.maxWeightKg||Number.MAX_SAFE_INTEGER)+EPS){unpacked.push({...unit,unpackedReason:'weight'});continue}
     let best=null
-    for(const point of candidatePoints(placements,bounds,gap,verticalGap)) for(const o of orientations(unit)){
-      if(dims.doorWidth&&dims.doorHeight){
-        const pass=Math.max(0,Number(settings.doorPassClearance||0))
-        const clearDoorW=Math.max(0,Number(dims.doorWidth)-pass*2),clearDoorH=Math.max(0,Number(dims.doorHeight)-pass)
-        if(o.width>clearDoorW+EPS||o.height>clearDoorH+EPS)continue
-      }
-      if(point.x<bounds.minX-EPS||point.y<bounds.minY-EPS||point.z<bounds.minZ-EPS)continue
-      if(point.x+o.length>bounds.maxX+EPS||point.y+o.width>bounds.maxY+EPS||point.z+o.height>bounds.maxZ+EPS)continue
-      if(placements.some(p=>intersects(p,point.x,point.y,point.z,o.length,o.width,o.height,gap,verticalGap)))continue
-      const support=supportInfoAt(placements,lookup,unit,point.x,point.y,point.z,o.length,o.width,bounds,verticalGap)
-      if(support.ratio+EPS<Number(settings.supportRatio||0)||!support.ok)continue
-      const compact=(point.z-bounds.minZ)*1_000_000+(point.y-bounds.minY)*1_000+(point.x-bounds.minX)
-      const residual=(bounds.maxX-(point.x+o.length))+(bounds.maxY-(point.y+o.width))+(bounds.maxZ-(point.z+o.height))*.12
-      const edgeBonus=(Math.abs(point.x-bounds.minX)<1||Math.abs(point.y-bounds.minY)<1)?-20:0
-      const availX=bounds.maxX-point.x,availY=bounds.maxY-point.y
-      const repeatX=Math.max(0,Math.floor((availX+gap)/(o.length+gap)))
-      const repeatY=Math.max(0,Math.floor((availY+gap)/(o.width+gap)))
-      const tilePotential=repeatX*repeatY
-      const score=compact+residual+edgeBonus-tilePotential*100000
-      if(!best||score<best.score)best={point,o,score,stackLayer:support.layer}
+    const pts=candidatePoints(placements,bounds,gap,verticalGap),os=orientations(unit)
+    for(const point of pts)for(const o of os){
+      const support=validCandidate(placements,lookup,unit,point,o,dims,bounds,settings,gap,verticalGap)
+      if(!support)continue
+      const score=candidateScore(unit,point,o,support,bounds,gap,mode)
+      if(!best||score<best.score)best={point,o,score,stackLayer:support.layer,supportRatio:support.ratio}
     }
     if(!best){unpacked.push({...unit,unpackedReason:'space-or-constraints'});continue}
     placements.push({
@@ -177,32 +215,34 @@ function placeUnitsOrdered(units,dims,settings,nestedInsideUid){
       weightKg:unit.weightKg,rawWeightKg:unit.rawWeightKg,packageTareWeightKg:unit.packageTareWeightKg,
       packagingType:unit.packagingType,packagingLabel:unit.packagingLabel,
       color:unit.color,orientation:best.o.label,orientationDescription:best.o.description,nestedInsideUid,
-      stackLayer:best.stackLayer||1,maxStackLayers:unit.maxStackLayers||1,canBeStacked:unit.canBeStacked,canSupportCargo:unit.canSupportCargo,
+      stackLayer:best.stackLayer||1,supportRatio:best.supportRatio||1,maxStackLayers:unit.maxStackLayers||1,
+      canBeStacked:unit.canBeStacked,canSupportCargo:unit.canSupportCargo,
     })
     usedWeightKg+=unit.weightKg
   }
-  return {placements,unpacked,usedWeightKg,bounds}
+  return {placements,unpacked,usedWeightKg,bounds,mode}
 }
 
 function packedScore(packed){
   const vol=packed.placements.reduce((s,p)=>s+boxVolumeM3(p.length,p.width,p.height),0)
-  const distinct=new Set(packed.placements.map(p=>p.cargoId)).size;return [packed.placements.length,distinct,vol,-packed.unpacked.length]
+  const distinct=new Set(packed.placements.map(p=>p.cargoId)).size
+  const stacked=packed.placements.filter(p=>p.z>packed.bounds.minZ+EPS).length
+  const floorFootprint=packed.placements.filter(p=>p.z<=packed.bounds.minZ+EPS).reduce((s,p)=>s+p.length*p.width,0)
+  return [packed.placements.length,stacked,distinct,vol,-floorFootprint,-packed.unpacked.length]
 }
 function betterPacked(a,b){
   if(!b)return true
   const aa=packedScore(a),bb=packedScore(b)
-  if(aa[0]!==bb[0])return aa[0]>bb[0]
-  if(aa[1]!==bb[1])return aa[1]>bb[1]
-  if(Math.abs(aa[2]-bb[2])>EPS)return aa[2]>bb[2]
-  return aa[3]>bb[3]
+  for(let i=0;i<aa.length;i++){if(Math.abs(aa[i]-bb[i])>EPS)return aa[i]>bb[i]}
+  return false
 }
 function placeUnits(units,dims,settings,nestedInsideUid){
   let best=null
-  for(const ordered of sortingVariants(units)){
-    const packed=placeUnitsOrdered(ordered,dims,settings,nestedInsideUid)
+  for(const variant of sortingVariants(units)){
+    const packed=placeUnitsOrdered(variant.ordered,dims,settings,nestedInsideUid,variant.mode)
     if(betterPacked(packed,best))best=packed
   }
-  return best||{placements:[],unpacked:[...units],usedWeightKg:0,bounds:boundsFor(dims,settings)}
+  return best||{placements:[],unpacked:[...units],usedWeightKg:0,bounds:boundsFor(dims,settings),mode:'none'}
 }
 
 function packNestedSpaces(units,settings){
@@ -254,8 +294,8 @@ function selectBest(units,specs,settings,goal='fewest'){
       const vd=b.packedVol-a.packedVol;if(Math.abs(vd)>EPS)return vd
       return a.spec.nominalVolumeM3-b.spec.nominalVolumeM3
     }
-    const vd=b.packedVol-a.packedVol;if(Math.abs(vd)>EPS)return vd
     const nd=b.packed.placements.length-a.packed.placements.length;if(nd)return nd
+    const vd=b.packedVol-a.packedVol;if(Math.abs(vd)>EPS)return vd
     return b.spec.nominalVolumeM3-a.spec.nominalVolumeM3
   })[0]
 }
@@ -300,6 +340,8 @@ function optimizeSinglePlan(cargo,containerSpecs,settings,goal){
   }
   const nestedAssignedIds=new Set(nesting.assignments.flatMap(a=>a.placements.map(p=>p.uid)))
   const trulyUnpacked=remaining.filter(u=>!nestedAssignedIds.has(u.uid))
+  containers.sort((a,b)=>Number(b.spec.nominalVolumeM3||0)-Number(a.spec.nominalVolumeM3||0)||String(a.spec.shortName||a.spec.name).localeCompare(String(b.spec.shortName||b.spec.name)))
+  containers.forEach((c,i)=>{c.index=i+1})
   const totalNominalVolumeM3=containers.reduce((sum,c)=>sum+Number(c.spec.nominalVolumeM3||boxVolumeM3(c.spec.length,c.spec.width,c.spec.height)),0)
   const totalUsableVolumeM3=containers.reduce((sum,c)=>sum+c.usableVolumeM3,0),totalUsedVolumeM3=containers.reduce((sum,c)=>sum+c.usedVolumeM3,0)
   return {containers,unpacked:trulyUnpacked,nestedAssignments:nesting.assignments,totalCargoVolumeM3,totalRawVolumeM3,topLevelCargoVolumeM3,nestedSavedVolumeM3,totalWeightKg,totalRawWeightKg,packagingWeightKg:Math.max(0,totalWeightKg-totalRawWeightKg),goal,totalNominalVolumeM3,overallUtilization:totalUsableVolumeM3?totalUsedVolumeM3/totalUsableVolumeM3:0,elapsedMs:performance.now()-start}
@@ -315,20 +357,34 @@ function comparePlanForGoal(a,b,goal){
   if(goal==='prefer20'){const d=familyCount(b,'20')-familyCount(a,'20');if(d)return d}
   return b.overallUtilization-a.overallUtilization
 }
+function containerPoolVariants(containerSpecs){
+  const enabled=containerSpecs.filter(c=>c.enabled)
+  const pools=[]
+  const add=(name,pred)=>{const ids=enabled.filter(pred).map(c=>c.id).sort();if(!ids.length)return;const key=ids.join('|');if(pools.some(p=>p.key===key))return;pools.push({name,key,specs:containerSpecs.map(c=>({...c,enabled:c.enabled&&ids.includes(c.id)}))})}
+  add('all',()=>true)
+  add('standard-first',c=>!String(c.id||'').toLowerCase().includes('hc')&&!String(c.name||'').toLowerCase().includes('high cube'))
+  add('20+40std',c=>specFamily(c)==='20'||(specFamily(c)==='40'&&!String(c.id||'').toLowerCase().includes('hc')&&!String(c.name||'').toLowerCase().includes('high cube')))
+  add('20+40hc',c=>specFamily(c)==='20'||String(c.id||'').toLowerCase().includes('hc')||String(c.name||'').toLowerCase().includes('high cube'))
+  return pools
+}
+
 export function optimizePacking(cargo,containerSpecs,settings){
   const goal=settings.optimizationGoal||'auto'
   if(goal==='only40'||goal==='only20'){
     const fam=goal==='only40'?'40':'20',filtered=containerSpecs.map(c=>({...c,enabled:c.enabled&&specFamily(c)===fam}))
     const p=optimizeSinglePlan(cargo,filtered,settings,'fewest')
-    return {...p,goal,requestedGoal:goal,selectedStrategy:goal,alternatives:[planSummary(p)]}
+    return {...p,goal,requestedGoal:goal,selectedStrategy:goal,selectedPool:fam,alternatives:[planSummary(p)]}
   }
-  // Always compute the same candidate pool. Preference modes are objective
-  // functions, not a command to waste capacity on a larger residual container.
   const requestedGoals=['fewest','prefer40','prefer20','utilization']
-  const plans=requestedGoals.map(g=>optimizeSinglePlan(cargo,containerSpecs,settings,g))
+  const pools=containerPoolVariants(containerSpecs)
+  const plans=[]
+  for(const pool of pools)for(const g of requestedGoals){
+    const p=optimizeSinglePlan(cargo,pool.specs,settings,g)
+    plans.push({...p,poolName:pool.name})
+  }
   const bestFor=requested=>[...plans].sort((a,b)=>comparePlanForGoal(a,b,requested))[0]
   const effectiveGoal=goal==='auto'?'fewest':goal
   const best=bestFor(effectiveGoal)
-  const alternatives=requestedGoals.map(requested=>{const picked=bestFor(requested);return {...planSummary(picked),goal:requested,sourceStrategy:picked.goal}})
-  return {...best,goal,requestedGoal:goal,selectedStrategy:best.goal,alternatives,elapsedMs:plans.reduce((sum,p)=>sum+p.elapsedMs,0)}
+  const alternatives=requestedGoals.map(requested=>{const picked=bestFor(requested);return {...planSummary(picked),goal:requested,sourceStrategy:picked.goal,pool:picked.poolName}})
+  return {...best,goal,requestedGoal:goal,selectedStrategy:best.goal,selectedPool:best.poolName,alternatives,elapsedMs:plans.reduce((sum,p)=>sum+p.elapsedMs,0)}
 }
