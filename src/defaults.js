@@ -30,4 +30,4 @@ export const presetSettings = {
   practical:{ itemGap:20, doorClearance:50, rearClearance:30, sideClearance:30, ceilingClearance:30, floorClearance:0, aisleWidth:0, doorPassClearance:15, supportRatio:0.75, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
   safe:{ itemGap:40, doorClearance:100, rearClearance:60, sideClearance:50, ceilingClearance:50, floorClearance:0, aisleWidth:0, doorPassClearance:25, supportRatio:0.9, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
 }
-export const defaultSettings = { preset:'practical', ...presetSettings.practical }
+export const defaultSettings = { preset:'practical', ...presetSettings.practical, optimizationGoal:'auto' }

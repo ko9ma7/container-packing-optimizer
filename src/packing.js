@@ -37,11 +37,13 @@ export function expandCargo(cargo){
 
 function orientations(unit){
   const d=[unit.length,unit.width,unit.height]
-  const raw=unit.rotation==='locked'
-    ? [[d[0],d[1],d[2],'L×W×H']]
-    : unit.rotation==='upright'
-      ? [[d[0],d[1],d[2],'L×W×H'],[d[1],d[0],d[2],'W×L×H']]
-      : [[d[0],d[1],d[2],'L×W×H'],[d[0],d[2],d[1],'L×H×W'],[d[1],d[0],d[2],'W×L×H'],[d[1],d[2],d[0],'W×H×L'],[d[2],d[0],d[1],'H×L×W'],[d[2],d[1],d[0],'H×W×L']]
+  const mode=unit.rotation||'free'
+  let raw
+  if(mode==='locked')raw=[[d[0],d[1],d[2],'L×W×H']]
+  else if(mode==='upright')raw=[[d[0],d[1],d[2],'L×W×H'],[d[1],d[0],d[2],'W×L×H']]
+  else if(mode==='layWidth')raw=[[d[0],d[2],d[1],'L×H×W'],[d[2],d[0],d[1],'H×L×W']]
+  else if(mode==='layLength')raw=[[d[2],d[1],d[0],'H×W×L'],[d[1],d[2],d[0],'W×H×L']]
+  else raw=[[d[0],d[1],d[2],'L×W×H'],[d[0],d[2],d[1],'L×H×W'],[d[1],d[0],d[2],'W×L×H'],[d[1],d[2],d[0],'W×H×L'],[d[2],d[0],d[1],'H×L×W'],[d[2],d[1],d[0],'H×W×L']]
   const seen=new Set()
   return raw.filter(([l,w,h])=>{const k=`${l}|${w}|${h}`;if(seen.has(k))return false;seen.add(k);return true}).map(([length,width,height,label])=>({length,width,height,label}))
 }
@@ -72,17 +74,19 @@ function supportersStackable(placements,lookup,x,y,z,l,w,bounds,verticalGap){
   return placements.filter(p=>Math.abs(p.z+p.height+verticalGap-z)<=1&&overlapArea(p,x,y,l,w)>0).every(p=>lookup.get(p.uid)?.stackable!==false)
 }
 function candidatePoints(placements,bounds,gap,verticalGap){
-  const pts=[{x:bounds.minX,y:bounds.minY,z:bounds.minZ}]
-  placements.forEach(p=>pts.push(
-    {x:p.x+p.length+gap,y:p.y,z:p.z},
-    {x:p.x,y:p.y+p.width+gap,z:p.z},
-    {x:p.x,y:p.y,z:p.z+p.height+verticalGap},
-    {x:p.x+p.length+gap,y:p.y+p.width+gap,z:p.z},
-    {x:p.x+p.length+gap,y:p.y,z:p.z+p.height+verticalGap},
-    {x:p.x,y:p.y+p.width+gap,z:p.z+p.height+verticalGap}
-  ))
+  // Cross-combine every occupied edge. This is more expensive than only six local
+  // neighbors, but it discovers the long narrow gaps that occur in real CAD-like
+  // row layouts and substantially improves repeated-item packing.
+  const xs=new Set([bounds.minX]),ys=new Set([bounds.minY]),zs=new Set([bounds.minZ])
+  placements.forEach(p=>{
+    xs.add(p.x);xs.add(p.x+p.length+gap)
+    ys.add(p.y);ys.add(p.y+p.width+gap)
+    zs.add(p.z);zs.add(p.z+p.height+verticalGap)
+  })
+  const pts=[]
+  for(const x of xs)for(const y of ys)for(const z of zs){if(x<bounds.maxX+EPS&&y<bounds.maxY+EPS&&z<bounds.maxZ+EPS)pts.push({x,y,z})}
   const uniq=new Map()
-  pts.forEach(p=>{if(p.x<bounds.maxX+EPS&&p.y<bounds.maxY+EPS&&p.z<bounds.maxZ+EPS)uniq.set(`${Math.round(p.x)}|${Math.round(p.y)}|${Math.round(p.z)}`,p)})
+  pts.forEach(pt=>uniq.set(`${Math.round(pt.x)}|${Math.round(pt.y)}|${Math.round(pt.z)}`,pt))
   return [...uniq.values()].sort((a,b)=>a.z-b.z||a.y-b.y||a.x-b.x)
 }
 
@@ -108,7 +112,14 @@ function placeUnits(units,dims,settings,nestedInsideUid){
       const compact=(point.z-bounds.minZ)*1_000_000+(point.y-bounds.minY)*1_000+(point.x-bounds.minX)
       const residual=(bounds.maxX-(point.x+o.length))+(bounds.maxY-(point.y+o.width))+(bounds.maxZ-(point.z+o.height))*.12
       const edgeBonus=(Math.abs(point.x-bounds.minX)<1||Math.abs(point.y-bounds.minY)<1)?-20:0
-      const score=compact+residual+edgeBonus
+      // Prefer orientations that can tile many identical pieces in the remaining
+      // floor rectangle. This prevents a locally compact first placement from
+      // destroying a second row of repeated cargo (the user's 1단 수세 case).
+      const availX=bounds.maxX-point.x,availY=bounds.maxY-point.y
+      const repeatX=Math.max(0,Math.floor((availX+gap)/(o.length+gap)))
+      const repeatY=Math.max(0,Math.floor((availY+gap)/(o.width+gap)))
+      const tilePotential=repeatX*repeatY
+      const score=compact+residual+edgeBonus-tilePotential*100000
       if(!best||score<best.score)best={point,o,score}
     }
     if(!best){unpacked.push({...unit,unpackedReason:'space-or-constraints'});continue}
@@ -150,20 +161,38 @@ function packNestedSpaces(units,settings){
 }
 
 function packOne(units,spec,settings){return placeUnits(units,{length:spec.length,width:spec.width,height:spec.height,maxWeightKg:spec.maxPayloadKg,doorWidth:spec.doorWidth,doorHeight:spec.doorHeight},settings)}
-function selectBest(units,specs,settings){
-  const candidates=specs.map(spec=>{const packed=packOne(units,spec,settings);const packedVol=packed.placements.reduce((s,p)=>s+boxVolumeM3(p.length,p.width,p.height),0);return{spec,packed,packedVol}}).filter(c=>c.packed.placements.length)
+function specFamily(spec){const id=String(spec.id||'').toLowerCase(),name=String(spec.name||'').toLowerCase();if(id.includes('20')||name.includes('20ft'))return '20';if(id.includes('40')||name.includes('40ft'))return '40';return 'other'}
+function usableVolumeFor(spec,settings){const b=boundsFor(spec,settings);return boxVolumeM3(Math.max(0,b.maxX-b.minX),Math.max(0,b.maxY-b.minY),Math.max(0,b.maxZ-b.minZ))}
+function selectBest(units,specs,settings,goal='fewest'){
+  const candidates=specs.map(spec=>{const packed=packOne(units,spec,settings),packedVol=packed.placements.reduce((sum,p)=>sum+boxVolumeM3(p.length,p.width,p.height),0),usable=usableVolumeFor(spec,settings);return{spec,packed,packedVol,utilization:usable?packedVol/usable:0,family:specFamily(spec)}}).filter(c=>c.packed.placements.length)
   if(!candidates.length)return null
   const full=candidates.filter(c=>!c.packed.unpacked.length)
-  if(full.length)return full.sort((a,b)=>a.spec.nominalVolumeM3-b.spec.nominalVolumeM3||b.spec.maxPayloadKg-a.spec.maxPayloadKg)[0]
-  return candidates.sort((a,b)=>b.packedVol-a.packedVol||b.packed.placements.length-a.packed.placements.length||a.spec.nominalVolumeM3-b.spec.nominalVolumeM3)[0]
+  const source=full.length?full:candidates
+  const preference=(c)=>goal==='prefer20'?(c.family==='20'?0:c.family==='40'?1:2):goal==='prefer40'?(c.family==='40'?0:c.family==='20'?1:2):0
+  return [...source].sort((a,b)=>{
+    if(goal==='prefer20'||goal==='prefer40'){
+      const pd=preference(a)-preference(b);if(pd)return pd
+      if(!full.length){const vd=b.packedVol-a.packedVol;if(Math.abs(vd)>EPS)return vd;const nd=b.packed.placements.length-a.packed.placements.length;if(nd)return nd}
+      return a.spec.nominalVolumeM3-b.spec.nominalVolumeM3
+    }
+    if(goal==='utilization'){
+      const ud=b.utilization-a.utilization;if(Math.abs(ud)>EPS)return ud
+      const vd=b.packedVol-a.packedVol;if(Math.abs(vd)>EPS)return vd
+      return a.spec.nominalVolumeM3-b.spec.nominalVolumeM3
+    }
+    if(full.length)return a.spec.nominalVolumeM3-b.spec.nominalVolumeM3||b.spec.maxPayloadKg-a.spec.maxPayloadKg
+    const vd=b.packedVol-a.packedVol;if(Math.abs(vd)>EPS)return vd
+    const nd=b.packed.placements.length-a.packed.placements.length;if(nd)return nd
+    return b.spec.nominalVolumeM3-a.spec.nominalVolumeM3
+  })[0]
 }
 
 function containerAnalytics(container,settings){
-  const ps=container.placements,totalWeight=ps.reduce((s,p)=>s+p.weightKg,0)
+  const ps=container.placements,totalWeight=ps.reduce((sum,p)=>sum+p.weightKg,0)
   const cg=ps.length&&totalWeight>0?{
-    x:ps.reduce((s,p)=>s+(p.x+p.length/2)*p.weightKg,0)/totalWeight,
-    y:ps.reduce((s,p)=>s+(p.y+p.width/2)*p.weightKg,0)/totalWeight,
-    z:ps.reduce((s,p)=>s+(p.z+p.height/2)*p.weightKg,0)/totalWeight,
+    x:ps.reduce((sum,p)=>sum+(p.x+p.length/2)*p.weightKg,0)/totalWeight,
+    y:ps.reduce((sum,p)=>sum+(p.y+p.width/2)*p.weightKg,0)/totalWeight,
+    z:ps.reduce((sum,p)=>sum+(p.z+p.height/2)*p.weightKg,0)/totalWeight,
   }:{x:0,y:0,z:0}
   const floorAreaM2=(container.spec.length*container.spec.width)/1_000_000
   const avgFloorLoadKgM2=floorAreaM2?totalWeight/floorAreaM2:0
@@ -178,19 +207,19 @@ function containerAnalytics(container,settings){
   return {centerOfGravity:cg,avgFloorLoadKgM2,warnings}
 }
 
-export function optimizePacking(cargo,containerSpecs,settings){
+function optimizeSinglePlan(cargo,containerSpecs,settings,goal){
   const start=performance.now(),allUnits=expandCargo(cargo)
-  const totalCargoVolumeM3=allUnits.reduce((s,u)=>s+boxVolumeM3(u.length,u.width,u.height),0)
-  const totalRawVolumeM3=cargo.reduce((s,u)=>s+boxVolumeM3(u.length,u.width,u.height)*Math.max(0,Math.floor(u.quantity)),0)
-  const totalWeightKg=allUnits.reduce((s,u)=>s+u.weightKg,0),totalRawWeightKg=cargo.reduce((s,u)=>s+Number(u.weightKg||0)*Math.max(0,Math.floor(u.quantity)),0)
+  const totalCargoVolumeM3=allUnits.reduce((sum,u)=>sum+boxVolumeM3(u.length,u.width,u.height),0)
+  const totalRawVolumeM3=cargo.reduce((sum,u)=>sum+boxVolumeM3(u.length,u.width,u.height)*Math.max(0,Math.floor(u.quantity)),0)
+  const totalWeightKg=allUnits.reduce((sum,u)=>sum+u.weightKg,0),totalRawWeightKg=cargo.reduce((sum,u)=>sum+Number(u.weightKg||0)*Math.max(0,Math.floor(u.quantity)),0)
   const nesting=packNestedSpaces(allUnits,settings);let remaining=nesting.remaining
-  const topLevelCargoVolumeM3=remaining.reduce((s,u)=>s+boxVolumeM3(u.length,u.width,u.height),0),nestedSavedVolumeM3=totalCargoVolumeM3-topLevelCargoVolumeM3
+  const topLevelCargoVolumeM3=remaining.reduce((sum,u)=>sum+boxVolumeM3(u.length,u.width,u.height),0),nestedSavedVolumeM3=totalCargoVolumeM3-topLevelCargoVolumeM3
   const enabled=containerSpecs.filter(c=>c.enabled&&c.length>0&&c.width>0&&c.height>0&&c.maxPayloadKg>0),containers=[]
   const hardLimit=Math.max(1,Math.min(150,allUnits.length+5))
   for(let i=0;i<hardLimit&&remaining.length;i++){
-    const best=selectBest(remaining,enabled,settings);if(!best)break
+    const best=selectBest(remaining,enabled,settings,goal);if(!best)break
     const ids=new Set(best.packed.placements.map(p=>p.uid)),nestedFor=nesting.assignments.filter(a=>ids.has(a.hostUid))
-    const usedVolumeM3=best.packed.placements.reduce((s,p)=>s+boxVolumeM3(p.length,p.width,p.height),0),usedWeightKg=best.packed.usedWeightKg
+    const usedVolumeM3=best.packed.placements.reduce((sum,p)=>sum+boxVolumeM3(p.length,p.width,p.height),0),usedWeightKg=best.packed.usedWeightKg
     const b=best.packed.bounds,usableVolume=boxVolumeM3(Math.max(0,b.maxX-b.minX),Math.max(0,b.maxY-b.minY),Math.max(0,b.maxZ-b.minZ))
     const container={index:containers.length+1,spec:best.spec,placements:best.packed.placements,nestedAssignments:nestedFor,usedVolumeM3,usedWeightKg,usableVolumeM3:usableVolume,volumeUtilization:usableVolume?usedVolumeM3/usableVolume:0,weightUtilization:usedWeightKg/best.spec.maxPayloadKg,remainingVolumeM3:Math.max(0,usableVolume-usedVolumeM3),bounds:b}
     Object.assign(container,containerAnalytics(container,settings));containers.push(container)
@@ -198,5 +227,16 @@ export function optimizePacking(cargo,containerSpecs,settings){
   }
   const nestedAssignedIds=new Set(nesting.assignments.flatMap(a=>a.placements.map(p=>p.uid)))
   const trulyUnpacked=remaining.filter(u=>!nestedAssignedIds.has(u.uid))
-  return {containers,unpacked:trulyUnpacked,nestedAssignments:nesting.assignments,totalCargoVolumeM3,totalRawVolumeM3,topLevelCargoVolumeM3,nestedSavedVolumeM3,totalWeightKg,totalRawWeightKg,packagingWeightKg:Math.max(0,totalWeightKg-totalRawWeightKg),elapsedMs:performance.now()-start}
+  const totalNominalVolumeM3=containers.reduce((sum,c)=>sum+Number(c.spec.nominalVolumeM3||boxVolumeM3(c.spec.length,c.spec.width,c.spec.height)),0)
+  const totalUsableVolumeM3=containers.reduce((sum,c)=>sum+c.usableVolumeM3,0),totalUsedVolumeM3=containers.reduce((sum,c)=>sum+c.usedVolumeM3,0)
+  return {containers,unpacked:trulyUnpacked,nestedAssignments:nesting.assignments,totalCargoVolumeM3,totalRawVolumeM3,topLevelCargoVolumeM3,nestedSavedVolumeM3,totalWeightKg,totalRawWeightKg,packagingWeightKg:Math.max(0,totalWeightKg-totalRawWeightKg),goal,totalNominalVolumeM3,overallUtilization:totalUsableVolumeM3?totalUsedVolumeM3/totalUsableVolumeM3:0,elapsedMs:performance.now()-start}
+}
+function planSummary(plan){const counts={};plan.containers.forEach(c=>counts[c.spec.shortName||c.spec.name]=(counts[c.spec.shortName||c.spec.name]||0)+1);return{goal:plan.goal,containerCount:plan.containers.length,unpackedCount:plan.unpacked.length,totalNominalVolumeM3:plan.totalNominalVolumeM3,overallUtilization:plan.overallUtilization,types:counts}}
+function autoPlanCompare(a,b){if(a.unpacked.length!==b.unpacked.length)return a.unpacked.length-b.unpacked.length;if(a.containers.length!==b.containers.length)return a.containers.length-b.containers.length;if(Math.abs(a.totalNominalVolumeM3-b.totalNominalVolumeM3)>EPS)return a.totalNominalVolumeM3-b.totalNominalVolumeM3;return b.overallUtilization-a.overallUtilization}
+export function optimizePacking(cargo,containerSpecs,settings){
+  const goal=settings.optimizationGoal||'auto'
+  if(goal!=='auto')return optimizeSinglePlan(cargo,containerSpecs,settings,goal)
+  const plans=['fewest','prefer40','prefer20','utilization'].map(g=>optimizeSinglePlan(cargo,containerSpecs,settings,g))
+  const best=[...plans].sort(autoPlanCompare)[0]
+  return {...best,goal:'auto',selectedStrategy:best.goal,alternatives:plans.map(planSummary),elapsedMs:plans.reduce((sum,p)=>sum+p.elapsedMs,0)}
 }
