@@ -1,225 +1,101 @@
-# GlobeHop V8
+# Container Fit
 
-> 최신 버전: V8.0 — 33,801개 도시 검색 인덱스, 국가별 주요 도시 디렉터리, 도시별 구조화 정보·날씨·대기질·Wikipedia 주변 지식 탐험을 추가했습니다.
+컨테이너 **내측 규격**, 제품/장비의 **실치수**, 실제 출하 시의 **포장 후 외형**, 그리고 탱크·프레임 등의 **사용 가능한 내부 빈 공간**을 함께 계산하여 컨테이너 종류·수량·배치 좌표를 제안하는 브라우저 기반 적재 최적화 웹서비스입니다.
 
-# GlobeHop 🌍✈️
+## Preview
 
-GlobeHop은 아이들이 나라·도시·명소를 직접 눌러 탐험하고, 출발지에서 목적지까지의 거리·시차·예상 이동시간을 보며 세계를 공부하는 **GitHub Pages용 정적 웹서비스**입니다.
+20ft Standard, 40ft Standard, 40ft High Cube의 내측 규격을 기본 제공하며 사용자 규격을 추가할 수 있습니다. 제품 실치수와 포장 외형을 분리하여 관리하고, 우드 고정·우드 스키드·우드 크레이트·팔레트·철제 프레임·방수/진공 포장·사용자 지정 포장을 각각 적용할 수 있습니다.
 
-이번 버전은 단순한 “지구본처럼 보이는 2D 화면”이 아니라 **WebGL로 직접 렌더링하는 실제 3D 구체**를 포함합니다.
+상부 개방 탱크나 빈 프레임처럼 실제 사용 가능한 내부가 있으면 별도 L×W×H 공간으로 등록하여 작은 화물을 먼저 삽입한 뒤, 외부에 남은 포장 단위만 컨테이너에 배치합니다.
 
-## Preview / 핵심 경험
+## Features
 
-1. 출발지를 고릅니다.
-2. 나라·도시·명소를 검색하거나 지도 위에서 직접 고릅니다.
-3. 여행을 시작하면 해당 구간이 잘 보이도록 화면이 자동 확대·회전합니다.
-4. 2D 지도와 WebGL 3D 지구본을 전환해서 볼 수 있습니다.
-5. 지도 위 국가·도시·명소에 마우스를 올리면 미니 정보가 표시됩니다.
-6. 국가나 포인트를 클릭하면 검색창을 다시 쓰지 않아도 바로 그곳으로 목적지가 바뀝니다.
-7. 거리·비행시간·육상거리·시차·현지시간과 국가 학습 카드를 함께 확인합니다.
+- 20STD / 40STD / 40HC 기본 내측 규격
+- 사용자 컨테이너 내측 규격 및 문 개구 규격 추가
+- 제품/장비 실치수 L×W×H와 실제 포장 후 외형 분리 관리
+- 장비 직접 적재
+- 우드 고정·블로킹
+- 우드 스키드
+- 우드 크레이트·박스
+- 팔레트 적재
+- 철제 프레임
+- 방수·진공 포장
+- 사용자 지정 포장
+- 포장별 L/W/H 추가 치수 및 포장 자중 편집
+- 실제 완성 포장 외형 직접 입력(override)
+- **적재 방향 3단계**: 입력 방향 고정 / 세움 유지 방향전환 / 모든 방향 허용(눕힘 포함)
+- **적층 역할 4단계**: 적층 안 함 / 위에 올릴 수 있음 / 받침으로 사용 가능 / 위·아래 모두 가능
+- 화물 간 간격 / 수직 적층 간격
+- 문측 작업 여유 / 후면 여유 / 좌우 벽면 여유 / 천장 여유 / 바닥 받침 높이
+- 측면 통로 예약 폭
+- 문 개구 통과 여유
+- 최대 적재 높이 제한
+- 평균 바닥하중 경고값
+- 상부 개방 탱크·프레임·빈 케이스의 내부 사용가능 공간 재활용
+- 내부 공간 허용 중량 설정
+- 컨테이너 수량 자동 선정 및 컨테이너별 배치
+- **블록 적재 최적화**: 회전·적층·내부 공간을 반영하되 후보 탐색 횟수를 화물 수에 따라 제한해 브라우저 계산시간을 관리
+- Web Worker 비동기 계산 + 15초 자동 중단 + 계산 중 취소 지원. 조건을 수정하면 이전 계산은 즉시 폐기하여 오래된 결과가 덮어쓰지 않음
+- 화물 표에서 **수량·적재 방향·적층 역할을 즉시 수정**
+- 계산 전 **입력 검증**: 특정 품목이 총 체적의 과반을 차지하거나, 세움 유지/중량 미입력으로 결과가 왜곡될 가능성을 사전 표시
+- 화물 수정 모달에서 복잡한 축 이름 대신 **적재 방향 / 적층 역할**만 선택
+- 3D 등각 보기 / 평면 배치 보기
+- 정확한 X/Y/Z 좌표와 배치 방향
+- 컨테이너별 무게중심 X/Y/Z 계산
+- 평균 바닥하중 계산 및 경고
+- 내부 삽입 화물 리스트와 외부 점유 절감 체적 계산
+- 프로젝트 JSON 저장/불러오기
+- 확장 CSV 화물 불러오기
+- 결과 JSON / CSV 좌표 다운로드
+- **PDF 보고서 다운로드**
+- **Excel XLSX 다운로드**
+- **PNG 결과 이미지 다운로드**
+- LocalStorage 자동 저장
+- 메뉴 클릭 스크롤 + 현재 섹션 Active 표시
+- 320 / 375 / 430 / 768 / 1024 / 1440px 반응형 대응
+- GitHub Pages 자동 배포
 
-## 3D Globe
+## Tech Stack
 
-`src/modules/globe3d.js`는 별도 외부 3D 라이브러리 없이 WebGL로 동작합니다.
+- HTML5
+- CSS3
+- JavaScript ES Modules
+- Canvas API (PNG/PDF 보고서)
+- 자체 경량 XLSX ZIP 생성기
+- Node.js 빌드/개발 서버 스크립트
+- Browser LocalStorage
 
-- 실제 구(Sphere) 메시 렌더링
-- 국가 GeoJSON을 지구 텍스처로 변환
-- 마우스/터치 드래그 회전
-- 휠 확대/축소
-- 모바일 두 손가락 핀치 확대/축소
-- 출발지→목적지 자동 카메라 회전
-- 이동 구간 자동 줌
-- 구 표면 위로 솟아오르는 비행 arc
-- arc를 따라 움직이는 비행기
-- 편도 / 왕복 애니메이션
-- 도시·명소 포인트 표시
-- 포인트 hover/tap 정보
-- 지구 표면의 국가 자체를 마우스로 판별해 hover/click
-- 선택 국가 하이라이트
-- WebGL을 쓸 수 없는 브라우저에서는 2D 지도로 자동 fallback
-
-## 2D Map
-
-`src/modules/globe.js`는 교육용 평면 세계지도입니다.
-
-- 국가 영역 hover / keyboard focus
-- 국가 클릭 → 해당 국가 수도로 즉시 이동
-- 도시·명소 포인트 hover/click
-- 출발지→목적지 비행 경로 애니메이션
-- 편도 / 왕복
-- 이동 시작 시 구간 자동 확대
-- 선택 국가 하이라이트
-
-## 거리와 이동 정보
-
-지도 위에서 움직이는 교통수단은 **비행기만** 사용합니다. 배·기차가 같은 선을 따라가는 잘못된 표현은 제거했습니다.
-
-대신 아래 값을 별도로 제공합니다.
-
-- 직선거리: Haversine 계산
-- 예상 비행시간: 교육용 거리 기반 추정
-- 육상거리 / 육상시간: 가능한 경우 OSRM 도로 라우팅 결과
-- 도로 라우팅 실패 시: 국가·국경·대륙 관계 기반 fallback
-- 현실적인 육상 연결이 어려우면 `계산 어려움`
-- 목적지 현지시간
-- 출발지와 목적지 시차
-
-> 비행 arc는 실제 항공사의 운항 항로가 아니라 위치 관계를 이해하기 위한 교육용 시각화입니다.
-
-## 지도에서 바로 탐험
-
-### 2D
-
-- 국가 영역에 포인터를 올리면 국가명·수도·지역·거리 표시
-- 도시/랜드마크 점에 올리면 장소명·국가·거리 표시
-- 클릭하면 즉시 목적지 변경
-
-### 3D
-
-- 구 표면에 포인터를 올리면 위도/경도를 역산해 해당 국가 판별
-- 주요 도시·명소 포인트를 별도로 표시
-- 클릭하면 해당 국가/도시/명소로 이동
-- 목적지가 바뀌면 3D 카메라가 이동 구간의 중간 지점을 향해 회전하고 줌
-
-모바일에서는 hover 대신 터치/탭 흐름으로 사용할 수 있습니다.
-
-## 검색 및 데이터
-
-- 232개 국가 기본 검색 데이터
-- **33,801개 도시 검색 인덱스** (`src/data/cities/index.json`)
-- 국가 선택 시 인구 데이터를 우선한 주요 도시 디렉터리
-- 도시 선택 시 인구·행정구역·면적·고도·설립연도·시간대·언어·우편번호·자매도시 등 상세 정보
-- Open-Meteo 기반 현재 날씨·오늘 최고/최저·강수확률·일출/일몰
-- Open-Meteo/CAMS 기반 AQI·PM2.5·PM10·UV
-- Wikipedia/MediaWiki 기반 도시 소개·대표 이미지·주변 지식 장소
-- Wikidata 기반 구조화 도시 속성 보강
-- 52개 대표 도시·명소 오프라인 탐험 포인트 및 국가 수도 동적 포인트
-- World Bank API 기반 국가 인구/GDP/GNI 보강
-- 외부 API가 실패해도 로컬 도시/국가 데이터로 기본 탐험 유지
-
-## 국가 학습 카드
-
-국가별 `src/data/knowledge/<code>.json`에 다음 정보를 분리합니다.
-
-- 나라 한눈에 보기
-- 현지 인사말
-- 기후
-- 여행하기 좋은 시기
-- 여행 팁
-- 대표 음식·특산물
-- 동물
-- 식물
-- 랜드마크
-- 재미있는 사실
-- 이미지 갤러리
-
-## 지원 언어
-
-현재 UI 언어:
-
-- 한국어
-- English
-- 日本語
-- 中文
-- हिन्दी
-- Deutsch
-- Français
-- Español
-- Português
-- العربية
-- বাংলা
-- Русский
-- Türkçe
-- Tiếng Việt
-- ไทย
-- اردو
-- Italiano
-- فارسی
-- Filipino
-- Bahasa Indonesia
-
-국가명은 `Intl.DisplayNames`를 이용해 가능한 범위에서 현지화합니다. 국가별 긴 학습 콘텐츠는 영어/한국어를 기본으로 하고 국가 JSON에 언어 블록을 추가하는 방식으로 확장할 수 있습니다.
-
-## 기본 출발지
-
-`src/data/origins/index.json`에서 관리합니다.
-
-- 서울
-- 뉴델리
-- 베를린
-- 파리
-- 도쿄
-- 베이징
-- 자카르타
-- 방콕
-- 뉴욕
-- 상파울루
-- 카이로
-- 두바이
-- 다카
-- 카라치
-- 모스크바
-- 이스탄불
-- 하노이
-- 로마
-- 테헤란
-- 멕시코시티
-- 라고스
-- 런던
-- 마드리드
-- 마닐라
-
-브라우저 위치 권한을 허용하면 **내 위치**도 출발지로 사용할 수 있습니다.
+런타임 외부 라이브러리가 없어 GitHub Pages에서 정적으로 동작합니다.
 
 ## Project Structure
 
 ```text
-GlobeHop_3D_V5_COMPLETE_PROJECT/
-├─ .github/
-│  └─ workflows/
-│     └─ deploy.yml
-├─ docs/
-│  ├─ ARCHITECTURE.md
-│  ├─ DATA_GUIDE.md
-│  ├─ CITY_DATA_EXPANSION.md
-│  ├─ PROJECT_STRUCTURE.md
-│  ├─ ROUTING_AND_PRIVACY.md
-│  └─ INTERACTION_AND_3D.md
+/
 ├─ public/
-│  ├─ icons/
-│  ├─ .nojekyll
-│  ├─ 404.html
 │  ├─ favicon.svg
-│  ├─ manifest.webmanifest
+│  ├─ favicon-16x16.png
+│  ├─ favicon-32x32.png
+│  ├─ apple-touch-icon.png
+│  ├─ icon-192.png
+│  ├─ icon-512.png
 │  ├─ og-image.png
-│  ├─ repo-social-preview.png
+│  ├─ manifest.webmanifest
 │  ├─ robots.txt
 │  ├─ sitemap.xml
-│  └─ sw.js
+│  ├─ 404.html
+│  └─ .nojekyll
+├─ examples/
+│  └─ cad-layout-3-container-example.csv
+├─ src/
+│  ├─ app.js
+│  ├─ defaults.js
+│  ├─ packing.js
+│  └─ styles.css
 ├─ scripts/
 │  ├─ build.mjs
-│  └─ dev-server.mjs
-├─ src/
-│  ├─ data/
-│  │  ├─ countries/
-│  │  ├─ cities/
-│  │  ├─ knowledge/
-│  │  ├─ origins/
-│  │  ├─ places/
-│  │  └─ world-geometries.json
-│  ├─ modules/
-│  │  ├─ config.js
-│  │  ├─ dataService.js
-│  │  ├─ cityInsights.js
-│  │  ├─ geo.js
-│  │  ├─ globe.js
-│  │  ├─ globe3d.js
-│  │  ├─ i18n.js
-│  │  └─ storage.js
-│  ├─ app.js
-│  └─ styles.css
-├─ START_HERE.md
-├─ QA_REPORT.md
+│  ├─ dev-server.mjs
+│  └─ preview-server.mjs
+├─ .github/workflows/deploy.yml
 ├─ index.html
 ├─ package.json
 └─ README.md
@@ -227,18 +103,12 @@ GlobeHop_3D_V5_COMPLETE_PROJECT/
 
 ## Local Development
 
-Node.js 20 이상 권장:
-
 ```bash
 npm install
 npm run dev
 ```
 
-브라우저:
-
-```text
-http://localhost:5173/
-```
+개발 주소는 `http://localhost:5173/` 입니다.
 
 ## Build
 
@@ -246,97 +116,110 @@ http://localhost:5173/
 npm run build
 ```
 
-`dist/` 폴더가 생성됩니다.
+빌드 결과는 `dist/`에 생성됩니다. 내부 자원은 상대 경로를 사용하므로 GitHub Pages의 `https://USERNAME.github.io/REPOSITORY/` 하위 경로에서도 동작합니다.
 
-실제 GitHub Pages 주소를 메타데이터에 넣어서 빌드하려면:
+## Preview Build
 
 ```bash
-SITE_URL="https://USERNAME.github.io/REPOSITORY/" npm run build
+npm run preview
 ```
+
+기본 주소는 `http://localhost:4173/` 입니다.
 
 ## GitHub Pages Deployment
 
-1. GitHub Repository 생성
-2. 이 프로젝트 전체 업로드
-3. `Settings → Pages`
-4. Source를 **GitHub Actions**로 설정
-5. `main` 브랜치에 push
+### 권장: GitHub Actions
 
-포함된 `.github/workflows/deploy.yml`이 다음 과정을 수행합니다.
+1. 새 GitHub Repository를 생성합니다.
+2. 이 프로젝트 전체를 저장소에 push 합니다.
+3. 저장소 **Settings → Pages → Build and deployment → Source**를 `GitHub Actions`로 선택합니다.
+4. `main` 브랜치에 push하면 `.github/workflows/deploy.yml`이 `npm ci → npm run build → deploy-pages` 순서로 자동 배포합니다.
+5. 배포 완료 후 Pages URL을 그대로 공유하면 됩니다.
 
-```text
-git push
-→ npm ci
-→ npm run build
-→ dist artifact
-→ GitHub Pages deploy
-```
+### Deploy from a branch를 사용하는 경우
 
-## PWA / SEO / Sharing
+`Deploy from a branch / (root)`를 선택해도 `manifest.webmanifest`, favicon, 404 등 핵심 정적 파일이 404가 나지 않도록 동일 자산을 저장소 루트에도 포함했습니다. 다만 빌드 결과와 소스가 섞이지 않도록 **GitHub Actions 방식이 권장**됩니다.
 
-포함 파일:
+## Configuration
 
-- `manifest.webmanifest`
-- service worker
-- SVG/PNG favicon
-- Apple Touch Icon
-- 192/512 앱 아이콘
-- Open Graph 이미지
-- Repository Social Preview
-- `robots.txt`
-- `sitemap.xml`
-- JSON-LD
-- 커스텀 `404.html`
-- `.nojekyll`
+기본 컨테이너, 예제 화물, 포장 방식 시작값은 `src/defaults.js`에서 관리합니다.
 
-## Data Expansion
+포장 방식의 추가 치수와 자중은 **설계/제작 표준값이 아니라 입력을 빠르게 시작하기 위한 기본값**입니다. 실제 출하 계산에서는 포장 도면, 제작업체 확정 치수 또는 현장 측정값으로 수정하세요. 실제 완성 포장 규격이 확정된 경우 화물 편집 화면의 **완성 포장 외형 직접 입력**을 사용하는 것이 가장 정확합니다.
 
-대용량 데이터가 한 파일에 몰리지 않도록 분리했습니다.
+화물 목록 상단의 **CSV 저장**은 현재 화면에 등록된 화물·포장·회전·적층 설정을 그대로 CSV로 내보냅니다. 신규 접속은 빈 화물 목록으로 시작하며, **예제 불러오기**를 누르면 고정 자세·90° 회전·3축 회전·상부 적재·하중 지지·탱크 내부 삽입을 각각 확인할 수 있는 시험 데이터를 불러옵니다. **목록 비우기**는 컨테이너와 적재 조건을 유지한 채 화물만 삭제하고, **새 프로젝트**는 전체 작업을 빈 상태로 초기화합니다. 모든 다운로드 파일명에는 브라우저 현지시간 기준 `YYYY-MM-DD_HH-mm-ss` 저장 시각이 자동으로 붙습니다.
 
-- 나라 기본값 → `countries/`
-- 국가 학습팩 → `knowledge/`
-- 출발지 → `origins/`
-- 도시·명소 → `places/`
-- 지도 형상 → `world-geometries.json`
+### 방향·적층 입력 방법
 
-자세한 방법:
+- `기본 자세 고정`: 입력한 L×W×H 자세만 사용합니다.
+- `수직 유지 · 90° 회전`: 높이 H를 유지한 채 바닥면 L/W를 교환할 수 있습니다.
+- `3축 회전 · 눕힘 허용`: 눕힘을 포함한 최대 6개 직교 자세를 자동 비교합니다. 실제 운송 자세 제한이 없는 품목에만 사용하세요.
+- `적층 불가`: 다른 화물 위 적재와 하중 지지에 사용하지 않습니다.
+- `상부 적재 가능`: 지지 가능한 하부 화물의 상부면에 배치할 수 있습니다.
+- `하중 지지 가능`: 이 화물의 윗면을 다른 화물의 지지면으로 사용할 수 있습니다.
+- `상·하 적층 가능`: 상부 적재와 하중 지지를 모두 허용합니다.
 
-- `docs/DATA_GUIDE.md`
-- `docs/PROJECT_STRUCTURE.md`
-- `docs/ROUTING_AND_PRIVACY.md`
-- `docs/INTERACTION_AND_3D.md`
-- `docs/FEATURE_CHECKLIST.md`
+`도면 밀착 블록` 프리셋은 품목 사이의 블록 맞댐, 상부 간격 0 mm, 지지율 75%를 시작값으로 사용합니다. 사용자가 제공한 CAD 사례처럼 큰 장비를 하부 블록으로 만들고 1단 수세를 상부에 반복 배치할 때 적합합니다. 다만 실제 받침재/우드 프레임 구조가 75% 지지를 보장하는지 현장에서 확인해야 합니다.
 
-## Accessibility
+`examples/user-cad-block-v7.json`은 사용자가 제공한 치수·수량을 기준으로 40HC를 후보에서 제외하고 `도면 밀착 블록` 조건을 적용한 회귀 테스트 사례입니다. `npm run test:cad`는 **40STD + 40STD + 20STD**, 마지막 20STD에 **1단 수세 2개**, 미적재 0개, 배치 검증 통과를 자동 확인합니다.
 
-- semantic HTML
-- 키보드 검색 결과 탐색
-- 2D 국가 keyboard focus / Enter 이동
-- focus-visible
-- 충분한 터치 영역
-- `prefers-reduced-motion`
-- 이미지 alt
-- WebGL 미지원 시 2D fallback
+## Packing Model
 
-## Privacy
+현재 엔진은 축 정렬(orthogonal) 직육면체를 대상으로 하는 휴리스틱입니다. 다음 요소를 계산합니다.
 
-GlobeHop 자체 서버는 없습니다. 브라우저 위치 기능을 사용할 때에는 거리 및 라우팅 계산을 위해 외부 공개 API로 좌표가 전달될 수 있으므로 `docs/ROUTING_AND_PRIVACY.md`를 확인하세요.
+- 컨테이너 내측 L×W×H와 최대 적재중량
+- 문 개구부 폭·높이와 통과 여유
+- 제품 실치수 → 포장 후 외형 변환
+- 포장 자중의 총 적재중량 반영
+- **적재 방향 3단계**: 입력 방향 고정 / 세움 유지 방향전환 / 모든 방향 허용(눕힘 포함)
+- 화물 간 최소 간격과 수직 간격
+- 문측·후면·측벽·천장·바닥 여유
+- 작업 통로 예약
+- **위에 올라갈 수 있는지 / 위에서 지지할 수 있는지를 별도 지정**, 최대 적층 단수와 최소 지지면적
+- 화물 내부 사용가능 L×W×H 공간 및 내부 최대중량
+- 내부 삽입 화물 중량을 상위 화물 및 컨테이너 중량에 합산
+- 컨테이너별 무게중심
+- 평균 바닥하중 및 사용자 경고값
+
+내부 공간 활용은 탱크·프레임의 내측 공간을 작은 별도 Bin으로 계산해 작은 포장 단위를 우선 배치한 뒤, 외부에 남은 포장 단위만 컨테이너 최적화에 넘기는 방식입니다.
+
+## Export
+
+계산 완료 후 다음 형식으로 저장할 수 있습니다.
+
+- `container-fit-report.pdf` — 요약 + 컨테이너별 A4 이미지 보고서
+- `container-fit-result.xlsx` — Summary / Cargo / Placement / Nested / Unpacked 시트
+- `container-fit-report.png` — 요약 + 배치 이미지
+- `container-fit-placement.csv` — 컨테이너별 좌표 데이터
+- `container-fit-result.json` — 계산 결과 원본
+- `container-fit-project.json` — 입력 프로젝트 저장/복원
+
+## Practical Safety Note
+
+이 서비스는 선적 계획과 견적을 돕는 계산 도구입니다. 실제 출하 전에는 다음을 별도 검토해야 합니다.
+
+- 라싱 포인트 및 라싱 강도
+- 우드/철제 고정재 강도
+- 집중하중 및 바닥 점하중
+- 실제 반입 중 회전 경로
+- 포크/크레인 진입 방향
+- 제품별 허용 상부하중
+- 위험물·격리·통관 조건
+- 선사 및 현장 작업 기준
+
+## Custom Domain
+
+GitHub Pages의 Custom domain 설정에서 도메인을 연결한 뒤 HTTPS를 활성화하세요. 필요하면 `public/CNAME`에 도메인 한 줄을 추가할 수 있습니다.
 
 ## License
 
-코드: MIT License
+사내·개인 프로젝트에 맞게 수정해서 사용할 수 있습니다. 외부 공개 배포 시 조직 정책에 맞는 LICENSE 파일을 추가하세요.
 
-외부 데이터·이미지·API는 각 원출처의 이용조건을 별도로 확인하세요. `NOTICE.md`도 함께 확인하세요.
+## v1.5 / 블록 최적화·입력 단순화
 
-## V5 시각화 안정화 핵심
-
-- 2D 확대 시 비행기/핀/도시 점이 같이 커지던 문제를 수정했습니다. 마커는 화면에서 거의 일정한 크기로 유지됩니다.
-- 서울→일본 같은 짧은 구간은 2D에서 약 190×95 world-unit 범위로 맞춰 한국과 일본 전체 윤곽이 함께 보이도록 합니다.
-- 3D는 짧은 지역 여행에서 전체 국토 외곽을 억지로 모두 맞추지 않고, 출발·도착 지점을 중심으로 지역 확대 카메라를 사용합니다.
-- 서울→도쿄 기준 925×420 화면에서 두 지점이 약 266px 떨어져 보이도록 카메라 거리를 조정했습니다.
-- 3D 국가 라벨과 도시 라벨이 겹치지 않도록 목적지가 국가일 때 중복 도착 도시 라벨을 생략하고, 국가명은 지구 표면 텍스처에도 표시합니다.
-- 선택 국가의 도시·명소 포인트는 우선순위와 개수 제한을 적용해 과밀 표시를 줄였습니다.
-- `?view=map` / `?view=globe` URL 파라미터로 QA 시 특정 보기 모드를 강제할 수 있습니다.
-- Service Worker 캐시는 V5 키로 갱신했습니다.
-
-자세한 변경점은 `docs/V5_VISUAL_FIX.md`를 확인하세요.
+- `90° / 옆 눕힘 / 앞 눕힘` 용어를 제거하고 **적재 방향 3단계**로 정리했습니다.
+- 한 개의 모호한 적층 체크 대신 **적층 역할 4단계**로 하부 받침과 상부 적재 가능 여부를 구분합니다.
+- 동일 품목을 반복 블록으로 만들기 위해 여러 화물 그룹 순서를 자동 비교하는 **multi-start 블록 패킹**을 추가했습니다.
+- 같은 높이의 여러 받침 화물 상부면을 합산하여, 하나의 상부 화물이 품목 경계에 걸쳐도 설정한 지지율을 만족하면 배치 후보로 사용합니다.
+- **도면 밀착 블록** 프리셋을 추가했습니다.
+- 컨테이너별 `블록 밀도`, `블록 외곽 체적`, `블록 내부 공극`, `배치 검증` 결과를 제공합니다.
+- 회귀 테스트 `npm run test:cad`를 추가했습니다.

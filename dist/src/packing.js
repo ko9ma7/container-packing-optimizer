@@ -148,7 +148,8 @@ function candidatePointsForOrientation(placements,bounds,settings,verticalGap,o,
   }
   const uniq=new Map()
   pts.forEach(pt=>uniq.set(`${Math.round(pt.x)}|${Math.round(pt.y)}|${Math.round(pt.z)}`,pt))
-  return [...uniq.values()].sort((a,b)=>a.z-b.z||a.y-b.y||a.x-b.x).slice(0,2400)
+  const cap=placements.length>60?220:placements.length>30?340:520
+  return [...uniq.values()].sort((a,b)=>a.z-b.z||a.y-b.y||a.x-b.x).slice(0,cap)
 }
 
 function orientationFlex(unit){
@@ -384,6 +385,7 @@ function placeUnitsBlock(units,dims,settings,nestedInsideUid){
   const supporterVariants=supporterOrderVariants(supporters)
   const stackVariants=stackableOrderVariants(stackables)
   let best=null,runs=0
+  const runLimit=units.length>100?4:units.length>60?8:units.length>30?20:24
   for(const so of supporterVariants){
     for(const to of stackVariants){
       const packed=placeUnitsBlockVariant(units,dims,settings,nestedInsideUid,so,to)
@@ -391,9 +393,9 @@ function placeUnitsBlock(units,dims,settings,nestedInsideUid){
       if(betterPacked(packed,best))best=packed
       // Keep browser latency bounded. The first variants are deliberate and
       // remaining variants are permutations for escaping local minima.
-      if(runs>=48)break
+      if(runs>=runLimit)break
     }
-    if(runs>=48)break
+    if(runs>=runLimit)break
   }
   return best||placeUnitsBlockVariant(units,dims,settings,nestedInsideUid,supporters,stackables)
 }
@@ -414,14 +416,12 @@ function betterPacked(a,b){
 }
 function placeUnits(units,dims,settings,nestedInsideUid){
   let best=placeUnitsBlock(units,dims,settings,nestedInsideUid)
-  // Auto/block mode is intentionally block-first and must stay interactive in
-  // the browser. Running every legacy ordering for every container/pool made
-  // 6-orientation searches unnecessarily expensive and could still select a
-  // locally dense but globally poor small-item arrangement.
-  if(settings.optimizationGoal==='auto'||settings.optimizationGoal==='block')return best
-  for(const variant of sortingVariants(units).slice(0,4)){
-    const packed=placeUnitsOrdered(variant.ordered,dims,settings,nestedInsideUid,variant.mode)
-    if(betterPacked(packed,best))best=packed
+  // v9: keep every objective responsive. The block solver already explores
+  // multiple cargo-group orders; only small jobs get one additional legacy
+  // ordering to escape a local minimum.
+  if(units.length<=24&&settings.optimizationGoal!=='auto'&&settings.optimizationGoal!=='block'){
+    const variant=sortingVariants(units)[1]
+    if(variant){const packed=placeUnitsOrdered(variant.ordered,dims,settings,nestedInsideUid,variant.mode);if(betterPacked(packed,best))best=packed}
   }
   return best||{placements:[],unpacked:[...units],usedWeightKg:0,bounds:boundsFor(dims,settings),mode:'none'}
 }
@@ -581,9 +581,9 @@ function containerPoolVariants(containerSpecs){
   const pools=[]
   const add=(name,pred)=>{const ids=enabled.filter(pred).map(c=>c.id).sort();if(!ids.length)return;const key=ids.join('|');if(pools.some(p=>p.key===key))return;pools.push({name,key,specs:containerSpecs.map(c=>({...c,enabled:c.enabled&&ids.includes(c.id)}))})}
   add('all',()=>true)
-  add('standard-first',c=>!String(c.id||'').toLowerCase().includes('hc')&&!String(c.name||'').toLowerCase().includes('high cube'))
-  add('20+40std',c=>specFamily(c)==='20'||(specFamily(c)==='40'&&!String(c.id||'').toLowerCase().includes('hc')&&!String(c.name||'').toLowerCase().includes('high cube')))
-  add('20+40hc',c=>specFamily(c)==='20'||String(c.id||'').toLowerCase().includes('hc')||String(c.name||'').toLowerCase().includes('high cube'))
+  // Compare one practical standard-only pool against all enabled candidates.
+  // Extra HC-specific pools were largely redundant and multiplied runtime.
+  add('standard',c=>!String(c.id||'').toLowerCase().includes('hc')&&!String(c.name||'').toLowerCase().includes('high cube'))
   return pools
 }
 
@@ -594,16 +594,14 @@ export function optimizePacking(cargo,containerSpecs,settings){
     const p=optimizeSinglePlan(cargo,filtered,settings,'fewest')
     return {...p,goal,requestedGoal:goal,selectedStrategy:goal,selectedPool:fam,alternatives:[planSummary(p)]}
   }
-  const requestedGoals=['block','fewest','prefer40','prefer20','utilization']
-  const pools=containerPoolVariants(containerSpecs)
   const effectiveGoal=goal==='auto'?'block':goal
-  // First solve the requested objective across container pools. Once the best
-  // pool is known, build comparison cards inside that pool only. This keeps
-  // the result useful while avoiding 20 full 3D bin-packing runs per click.
-  const poolPlans=pools.map(pool=>({...optimizeSinglePlan(cargo,pool.specs,settings,effectiveGoal),poolName:pool.name}))
-  const best=[...poolPlans].sort((a,b)=>comparePlanForGoal(a,b,effectiveGoal))[0]
-  const chosenPool=pools.find(p=>p.name===best.poolName)||pools[0]
-  const altPlans=requestedGoals.map(requested=>requested===effectiveGoal?best:{...optimizeSinglePlan(cargo,chosenPool.specs,settings,requested),poolName:chosenPool.name})
-  const alternatives=altPlans.map((picked,i)=>({...planSummary(picked),goal:requestedGoals[i],sourceStrategy:picked.goal,pool:picked.poolName}))
-  return {...best,goal,requestedGoal:goal,selectedStrategy:best.goal,selectedPool:best.poolName,alternatives,elapsedMs:[...poolPlans,...altPlans].reduce((sum,p)=>sum+(p.elapsedMs||0),0)}
+  const pools=containerPoolVariants(containerSpecs)
+  const poolPlans=pools.map(pool=>({...optimizeSinglePlan(cargo,pool.specs,{...settings,optimizationGoal:effectiveGoal},effectiveGoal),poolName:pool.name}))
+  const best=[...poolPlans].sort((a,b)=>comparePlanForGoal(a,b,effectiveGoal))[0]||optimizeSinglePlan(cargo,containerSpecs,{...settings,optimizationGoal:effectiveGoal},effectiveGoal)
+  // Strategy alternatives are intentionally not precomputed anymore. In v8
+  // five additional full 3D searches ran after the selected plan and made a
+  // second calculation appear frozen. Users can switch the objective and run
+  // it explicitly instead.
+  const alternatives=[{...planSummary(best),goal:effectiveGoal,sourceStrategy:best.goal,pool:best.poolName||'all'}]
+  return {...best,goal,requestedGoal:goal,selectedStrategy:best.goal,selectedPool:best.poolName||'all',alternatives,elapsedMs:poolPlans.reduce((sum,p)=>sum+(p.elapsedMs||0),0)}
 }
