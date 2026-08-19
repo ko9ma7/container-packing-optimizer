@@ -1,0 +1,13 @@
+{
+  "name": "container-packing-optimizer",
+  "private": true,
+  "version": "1.10.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/preview-server.mjs",
+    "test:cad": "node scripts/regression-cad.mjs",
+    "test:nested": "node scripts/regression-nested-deck.mjs"
+  }
+}
