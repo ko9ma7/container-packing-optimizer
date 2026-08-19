@@ -26,8 +26,9 @@ export const sampleCargo = [
 ]
 
 export const presetSettings = {
-  dense:{ itemGap:0, doorClearance:0, rearClearance:0, sideClearance:0, ceilingClearance:0, floorClearance:0, aisleWidth:0, doorPassClearance:0, supportRatio:0.6, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
-  practical:{ itemGap:20, doorClearance:50, rearClearance:30, sideClearance:30, ceilingClearance:30, floorClearance:0, aisleWidth:0, doorPassClearance:15, supportRatio:0.75, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
-  safe:{ itemGap:40, doorClearance:100, rearClearance:60, sideClearance:50, ceilingClearance:50, floorClearance:0, aisleWidth:0, doorPassClearance:25, supportRatio:0.9, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
+  dense:{ blockContact:true, itemGap:0, stackItemGap:0, doorClearance:0, rearClearance:0, sideClearance:0, ceilingClearance:0, floorClearance:0, aisleWidth:0, doorPassClearance:0, supportRatio:0.6, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
+  cad:{ blockContact:true, itemGap:20, stackItemGap:0, doorClearance:50, rearClearance:30, sideClearance:30, ceilingClearance:30, floorClearance:0, aisleWidth:0, doorPassClearance:15, supportRatio:0.75, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
+  practical:{ blockContact:false, itemGap:20, stackItemGap:0, doorClearance:50, rearClearance:30, sideClearance:30, ceilingClearance:30, floorClearance:0, aisleWidth:0, doorPassClearance:15, supportRatio:0.75, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
+  safe:{ blockContact:false, itemGap:40, stackItemGap:0, doorClearance:100, rearClearance:60, sideClearance:50, ceilingClearance:50, floorClearance:0, aisleWidth:0, doorPassClearance:25, supportRatio:0.9, useInnerSpaces:true, preferFewerContainers:true, maxLoadHeight:0, maxFloorLoadKgM2:0 },
 }
 export const defaultSettings = { preset:'practical', ...presetSettings.practical, optimizationGoal:'auto' }
