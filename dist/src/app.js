@@ -276,20 +276,20 @@ function renderViewerTab(container){
       <!-- Step Simulator Bar -->
       <div class="step-player-bar">
         <div class="step-controls">
-          <button class="step-btn" title="처음으로" data-action="step-first" data-container="${container.index}">⏮</button>
-          <button class="step-btn" title="이전 단계" data-action="step-prev" data-container="${container.index}">◀</button>
-          <button class="step-btn ${state.isPlayingStep?'is-active':''}" title="${state.isPlayingStep?'일시정지':'순서대로 재생'}" data-action="step-play-toggle" data-container="${container.index}">
+          <button class="step-btn step-btn--icon" title="처음으로" data-action="step-first" data-container="${container.index}">⏮</button>
+          <button class="step-btn step-btn--icon" title="이전 단계" data-action="step-prev" data-container="${container.index}">◀</button>
+          <button class="step-btn step-btn--play ${state.isPlayingStep?'is-active is-playing':''}" title="${state.isPlayingStep?'일시정지':'순서대로 재생'}" data-action="step-play-toggle" data-container="${container.index}">
             ${state.isPlayingStep?'⏸ 일시정지':'▶ 순차 재생'}
           </button>
-          <button class="step-btn" title="다음 단계" data-action="step-next" data-container="${container.index}">▶</button>
-          <button class="step-btn" title="전체 보기" data-action="step-all" data-container="${container.index}">전체</button>
+          <button class="step-btn step-btn--icon" title="다음 단계" data-action="step-next" data-container="${container.index}">▶</button>
+          <button class="step-btn step-btn--all ${currentStep===-1?'is-selected':''}" title="전체 보기" data-action="step-all" data-container="${container.index}">전체</button>
         </div>
         <div class="step-slider-wrap">
-          <span class="step-badge">${currentStep === -1 ? `전체 적재 (${seq.length}개)` : `Step ${currentStep + 1} / ${seq.length}`}</span>
-          <input type="range" class="step-slider" min="-1" max="${maxStep}" value="${currentStep}" data-container="${container.index}">
-          <div class="step-info-text">
-            ${activeStepItem ? `<b>${esc(activeStepItem.cargoName)}</b> (${activeStepItem.length}×${activeStepItem.width}×${activeStepItem.height}mm, ${activeStepItem.weightKg}kg) → 위치: X=${Math.round(activeStepItem.x)}, Y=${Math.round(activeStepItem.y)}, Z=${Math.round(activeStepItem.z)} (${activeStepItem.stackLayer > 1 ? '2단 상부' : '1단 바닥'})` : '전체 화물이 적재된 상태입니다. 슬라이더나 재생 버튼으로 지게차 상차 순서를 시뮬레이션하세요.'}
-          </div>
+          <span class="step-badge">${currentStep === -1 ? `전체 (${seq.length}개)` : `Step ${currentStep + 1} / ${seq.length}`}</span>
+          <input type="range" class="step-slider" min="-1" max="${maxStep}" value="${currentStep}" data-container="${container.index}" title="상차 순서 슬라이더">
+        </div>
+        <div class="step-info-text" title="${activeStepItem ? `${esc(activeStepItem.cargoName)} (${activeStepItem.length}×${activeStepItem.width}×${activeStepItem.height}mm, ${activeStepItem.weightKg}kg)` : ''}">
+          ${activeStepItem ? `<b>Step ${currentStep + 1}.</b> <strong>${esc(activeStepItem.cargoName)}</strong> <span class="step-dim">(${activeStepItem.length}×${activeStepItem.width}×${activeStepItem.height}mm, ${activeStepItem.weightKg}kg)</span> <span class="step-pos">→ 위치: X=${Math.round(activeStepItem.x)}, Y=${Math.round(activeStepItem.y)}, Z=${Math.round(activeStepItem.z)}</span> <span class="step-layer">${activeStepItem.stackLayer > 1 ? '· 2단 상부' : '· 1단 바닥'}</span>` : '💡 전체 화물이 적재된 상태입니다. 슬라이더나 순차 재생으로 상차 순서를 시뮬레이션하세요.'}
         </div>
       </div>
 
@@ -1487,12 +1487,12 @@ document.addEventListener('input', e=>{
     const bar=slider.closest('.step-player-bar')
     const badge=bar?.querySelector('.step-badge')
     const info=bar?.querySelector('.step-info-text')
-    if(badge) badge.textContent = val === -1 ? `전체 적재 (${seq.length}개)` : `Step ${val + 1} / ${seq.length}`
+    if(badge) badge.textContent = val === -1 ? `전체 (${seq.length}개)` : `Step ${val + 1} / ${seq.length}`
     if(info){
       const active = (val >= 0 && val < seq.length) ? seq[val] : null
       info.innerHTML = active
-        ? `<b>${esc(active.cargoName)}</b> (${active.length}×${active.width}×${active.height}mm, ${active.weightKg}kg) → 위치: X=${Math.round(active.x)}, Y=${Math.round(active.y)}, Z=${Math.round(active.z)}`
-        : '전체 화물이 적재된 상태입니다.'
+        ? `<b>Step ${val + 1}.</b> <strong>${esc(active.cargoName)}</strong> <span class="step-dim">(${active.length}×${active.width}×${active.height}mm, ${active.weightKg}kg)</span> <span class="step-pos">→ 위치: X=${Math.round(active.x)}, Y=${Math.round(active.y)}, Z=${Math.round(active.z)}</span> <span class="step-layer">${active.stackLayer > 1 ? '· 2단 상부' : '· 1단 바닥'}</span>`
+        : '💡 전체 화물이 적재된 상태입니다. 슬라이더나 순차 재생으로 상차 순서를 시뮬레이션하세요.'
     }
   }
 })

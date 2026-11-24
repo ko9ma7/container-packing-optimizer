@@ -255,48 +255,92 @@ body{font-size:16px}
 .step-player-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 14px;
-  padding: 10px 14px;
+  padding: 8px 14px;
   background: #f8fafc;
   border-top: 1px solid #e2e8f0;
   border-bottom: 1px solid #e2e8f0;
+  min-height: 48px;
+  box-sizing: border-box;
 }
 .step-controls {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
 }
 .step-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
   height: 32px;
+  padding: 0 10px;
   border: 1px solid #cbd5e1;
   background: #ffffff;
   border-radius: 7px;
   color: #334155;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
   transition: 0.15s;
+  box-sizing: border-box;
 }
 .step-btn:hover {
   background: #f1f5f9;
   color: #0284c7;
 }
-.step-btn.is-active {
+.step-btn--icon {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  font-size: 13px;
+}
+.step-btn--play {
+  min-width: 104px;
+  padding: 0 14px;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #0284c7;
+}
+.step-btn--play:hover {
   background: #0284c7;
   color: #ffffff;
   border-color: #0284c7;
 }
+.step-btn--play.is-playing,
+.step-btn--play.is-active {
+  background: #0284c7;
+  color: #ffffff;
+  border-color: #0284c7;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.2);
+}
+.step-btn--all {
+  min-width: 48px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+.step-btn--all.is-selected {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+  font-weight: 600;
+}
 .step-slider-wrap {
-  flex: 1;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  flex: 0 0 240px;
+  width: 240px;
+  max-width: 260px;
 }
 .step-slider {
   flex: 1;
+  width: 130px;
+  min-width: 100px;
   accent-color: #0284c7;
   cursor: pointer;
   height: 6px;
@@ -306,17 +350,45 @@ body{font-size:16px}
   font-weight: 700;
   color: #0369a1;
   background: #e0f2fe;
-  padding: 4px 9px;
+  padding: 4px 8px;
   border-radius: 6px;
   white-space: nowrap;
+  min-width: 76px;
+  text-align: center;
 }
 .step-info-text {
-  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  padding-left: 14px;
+  border-left: 1px solid #e2e8f0;
+  font-size: 12px;
   color: #475569;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 450px;
+  line-height: 1.4;
+}
+.step-info-text b {
+  color: #0284c7;
+  margin-right: 4px;
+}
+.step-info-text strong {
+  color: #0f172a;
+}
+.step-info-text .step-dim {
+  color: #64748b;
+  margin-left: 2px;
+}
+.step-info-text .step-pos {
+  color: #2563eb;
+  font-family: monospace;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.step-info-text .step-layer {
+  color: #059669;
+  font-weight: 600;
+  margin-left: 2px;
 }
 
 /* Selected Cargo Floating Panel */
@@ -1140,8 +1212,22 @@ body{font-size:16px}
   .canvas-3d-wrap {
     height: 360px;
   }
+  .step-player-bar {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .step-slider-wrap {
+    flex: 1;
+    min-width: 180px;
+  }
   .step-info-text {
-    max-width: 240px;
+    flex: 0 0 100%;
+    width: 100%;
+    max-width: 100%;
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px dashed #e2e8f0;
+    padding-top: 6px;
   }
   .manual-step-grid {
     grid-template-columns: 1fr;
