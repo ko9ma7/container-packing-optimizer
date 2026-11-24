@@ -7,6 +7,9 @@ await rm(dist, { recursive: true, force: true })
 await mkdir(dist, { recursive: true })
 await copyFile(new URL('../index.html', import.meta.url), new URL('../dist/index.html', import.meta.url))
 await cp(new URL('../src', import.meta.url), new URL('../dist/src', import.meta.url), { recursive: true })
+if (existsSync(new URL('../examples', import.meta.url))) {
+  await cp(new URL('../examples', import.meta.url), new URL('../dist/examples', import.meta.url), { recursive: true })
+}
 if (existsSync(new URL('../public', import.meta.url))) {
   const entries = ['favicon.svg','favicon-16x16.png','favicon-32x32.png','apple-touch-icon.png','icon-192.png','icon-512.png','og-image.png','manifest.webmanifest','robots.txt','sitemap.xml','404.html','.nojekyll']
   for (const file of entries) {

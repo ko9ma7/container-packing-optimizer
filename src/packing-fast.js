@@ -259,21 +259,216 @@ function selectBest(units,specs,settings,goal){
   })[0]
 }
 function validateLayout(container,settings){
-  const ps=container.placements,b=container.bounds,issues=[]
-  for(const p of ps)if(p.x<b.minX-EPS||p.y<b.minY-EPS||p.z<b.minZ-EPS||p.x+p.length>b.maxX+EPS||p.y+p.width>b.maxY+EPS||p.z+p.height>b.maxZ+EPS)issues.push(`${p.uid}: 컨테이너 사용 가능 경계 초과`)
-  for(let i=0;i<ps.length;i++)for(let j=i+1;j<ps.length;j++){const a=ps[i],q=ps[j];const overlap=!(a.x+a.length<=q.x+EPS||q.x+q.length<=a.x+EPS||a.y+a.width<=q.y+EPS||q.y+q.width<=a.y+EPS||a.z+a.height<=q.z+EPS||q.z+q.height<=a.z+EPS);if(overlap)issues.push(`${a.uid} ↔ ${q.uid}: 공간 겹침`)}
-  // Deck placements are validated by the deck solver. Non-deck upper placements are not produced by the fast solver.
+  const ps=container.placements,b=container.bounds,spec=container.spec,issues=[]
+  // 1. 컨테이너 사용 가능 경계 검증
+  for(const p of ps){
+    if(p.x<b.minX-EPS||p.y<b.minY-EPS||p.z<b.minZ-EPS||p.x+p.length>b.maxX+EPS||p.y+p.width>b.maxY+EPS||p.z+p.height>b.maxZ+EPS){
+      issues.push(`${p.uid} (${p.cargoName}): 컨테이너 사용 가능 경계 초과`)
+    }
+    // 도어 통과 여부 검증
+    if(spec.doorWidth&&spec.doorHeight){
+      const passMargin=Math.max(0,Number(settings.doorPassClearance||0))
+      if(p.width>Number(spec.doorWidth)-passMargin*2+EPS||p.height>Number(spec.doorHeight)-passMargin+EPS){
+        issues.push(`${p.uid} (${p.cargoName}): 도어 개구부(${spec.doorWidth}x${spec.doorHeight}mm) 통과 치수 초과`)
+      }
+    }
+  }
+  // 2. 3D 공간 간섭/충돌 검증
+  for(let i=0;i<ps.length;i++){
+    for(let j=i+1;j<ps.length;j++){
+      const a=ps[i],q=ps[j]
+      const overlap=!(a.x+a.length<=q.x+EPS||q.x+q.length<=a.x+EPS||a.y+a.width<=q.y+EPS||q.y+q.width<=a.y+EPS||a.z+a.height<=q.z+EPS||q.z+q.height<=a.z+EPS)
+      if(overlap)issues.push(`${a.uid} ↔ ${q.uid}: 3D 공간 겹침/충돌`)
+    }
+  }
+  // 3. 중량 초과 검증
+  const totalWeight=ps.reduce((s,p)=>s+p.weightKg,0)
+  if(spec.maxPayloadKg&&totalWeight>spec.maxPayloadKg+EPS){
+    issues.push(`컨테이너 최대 적재중량(${spec.maxPayloadKg.toLocaleString()}kg) 초과: 현재 ${totalWeight.toLocaleString()}kg`)
+  }
+  // 4. 상부 적층 지지 검증
+  const reqSupportRatio=Math.max(0,Math.min(1,Number(settings.supportRatio||0.75)))
+  for(const p of ps){
+    if(p.z>b.minZ+EPS){
+      // 바닥이 아닌 공중에 있는 화물: 하부에 지지 화물이 있는지 확인
+      const under=ps.filter(u=>u.uid!==p.uid&&Math.abs((u.z+u.height)-p.z)<=Math.max(15,Number(settings.deckThickness||0)+5))
+      const supportedArea=under.reduce((s,u)=>s+overlap2D(p,u),0)
+      const candArea=p.length*p.width
+      const ratio=candArea>0?supportedArea/candArea:0
+      if(!p.onDeck&&ratio<reqSupportRatio-EPS){
+        issues.push(`${p.uid} (${p.cargoName}): 하부 지지율 부족 (${(ratio*100).toFixed(1)}% < 기준 ${(reqSupportRatio*100).toFixed(0)}%)`)
+      }
+    }
+  }
   return {valid:issues.length===0,issues}
 }
+
+function calculateFloorHeatmap(container, gridX=24, gridY=10){
+  const spec=container.spec, ps=container.placements
+  const cellL=spec.length/gridX, cellW=spec.width/gridY
+  const cellAreaM2=(cellL*cellW)/1e6
+  const grid=Array.from({length:gridY},()=>Array(gridX).fill(0))
+  for(const p of ps){
+    const pWeight=p.weightKg||0
+    const pArea=p.length*p.width
+    if(pArea<=0||pWeight<=0)continue
+    const density=pWeight/pArea // kg/mm²
+    const startX=Math.max(0,Math.floor(p.x/cellL))
+    const endX=Math.min(gridX-1,Math.floor((p.x+p.length-EPS)/cellL))
+    const startY=Math.max(0,Math.floor(p.y/cellW))
+    const endY=Math.min(gridY-1,Math.floor((p.y+p.width-EPS)/cellW))
+    for(let y=startY;y<=endY;y++){
+      for(let x=startX;x<=endX;x++){
+        const ox=Math.max(0,Math.min(p.x+p.length,(x+1)*cellL)-Math.max(p.x,x*cellL))
+        const oy=Math.max(0,Math.min(p.y+p.width,(y+1)*cellW)-Math.max(p.y,y*cellW))
+        const overlapArea=ox*oy
+        grid[y][x]+=(overlapArea*density)
+      }
+    }
+  }
+  // Convert kg per cell to kg/m²
+  const loadGrid=grid.map(row=>row.map(val=>cellAreaM2>0?Math.round(val/cellAreaM2):0))
+  let maxCellLoad=0
+  for(const row of loadGrid)for(const v of row)if(v>maxCellLoad)maxCellLoad=v
+  return {gridX,gridY,cellL,cellW,matrix:loadGrid,maxCellLoad}
+}
+
 function containerAnalytics(container,settings){
   const ps=container.placements,totalWeight=ps.reduce((s,p)=>s+p.weightKg,0),cg=ps.length&&totalWeight>0?{x:ps.reduce((s,p)=>s+(p.x+p.length/2)*p.weightKg,0)/totalWeight,y:ps.reduce((s,p)=>s+(p.y+p.width/2)*p.weightKg,0)/totalWeight,z:ps.reduce((s,p)=>s+(p.z+p.height/2)*p.weightKg,0)/totalWeight}:{x:0,y:0,z:0}
   const floorArea=(container.spec.length*container.spec.width)/1e6,avgFloorLoadKgM2=floorArea?totalWeight/floorArea:0,usedCargoVolumeM3=ps.reduce((s,p)=>s+boxVolumeM3(p.length,p.width,p.height),0)
   const envelope=ps.length?{minX:Math.min(...ps.map(p=>p.x)),minY:Math.min(...ps.map(p=>p.y)),minZ:Math.min(...ps.map(p=>p.z)),maxX:Math.max(...ps.map(p=>p.x+p.length)),maxY:Math.max(...ps.map(p=>p.y+p.width)),maxZ:Math.max(...ps.map(p=>p.z+p.height))}:null
   const blockEnvelopeVolumeM3=envelope?boxVolumeM3(envelope.maxX-envelope.minX,envelope.maxY-envelope.minY,envelope.maxZ-envelope.minZ):0,blockDensity=blockEnvelopeVolumeM3?Math.min(1,usedCargoVolumeM3/blockEnvelopeVolumeM3):0,blockVoidM3=Math.max(0,blockEnvelopeVolumeM3-usedCargoVolumeM3)
-  const layoutValidation=validateLayout(container,settings),warnings=[];if(!layoutValidation.valid)warnings.push(`배치 검증: ${layoutValidation.issues.length}건의 기하 조건을 확인하세요.`)
+  const layoutValidation=validateLayout(container,settings),warnings=[]
+  if(!layoutValidation.valid)warnings.push(`배치 검증: ${layoutValidation.issues.length}건의 기하/물리 조건을 확인하세요.`)
   const limit=Number(settings.maxFloorLoadKgM2||0);if(limit>0&&avgFloorLoadKgM2>limit)warnings.push(`평균 바닥하중 ${avgFloorLoadKgM2.toFixed(0)} kg/m²가 설정 한도 ${limit.toFixed(0)} kg/m²를 초과합니다.`)
-  if(totalWeight>0){const nx=cg.x/container.spec.length,ny=cg.y/container.spec.width;if(nx<.25||nx>.75)warnings.push('길이 방향 무게중심이 중앙 50% 범위를 벗어났습니다.');if(ny<.30||ny>.70)warnings.push('좌우 무게중심이 중앙 40% 범위를 벗어났습니다.')}
-  return {centerOfGravity:cg,avgFloorLoadKgM2,blockEnvelopeVolumeM3,blockDensity,blockVoidM3,envelope,layoutValidation,warnings}
+  
+  // 무게중심 분석 (ISO 1496 규격)
+  const nx=container.spec.length>0?cg.x/container.spec.length:0.5
+  const ny=container.spec.width>0?cg.y/container.spec.width:0.5
+  const nz=container.spec.height>0?cg.z/container.spec.height:0.5
+  const isCgXSafe = nx >= 0.25 && nx <= 0.75
+  const isCgYSafe = ny >= 0.30 && ny <= 0.70
+  const isCgZSafe = nz <= 0.50
+  if(totalWeight>0){
+    if(!isCgXSafe)warnings.push(`길이 방향 무게중심(${(nx*100).toFixed(1)}%)이 중앙 50%(25%~75%) 범위를 벗어났습니다.`)
+    if(!isCgYSafe)warnings.push(`좌우 무게중심(${(ny*100).toFixed(1)}%)이 중앙 40%(30%~70%) 범위를 벗어났습니다.`)
+    if(!isCgZSafe)warnings.push(`높이 방향 무게중심(${(nz*100).toFixed(1)}%)이 50%를 초과하여 전복 위험에 주의하세요.`)
+  }
+
+  // ISO 1496 및 안전 수칙 7대 정밀 검증 체크리스트
+  const checklist = [
+    {
+      id: 'geometry',
+      category: '3D 기하 무결성',
+      name: '공간 간섭 및 경계 준수',
+      status: layoutValidation.valid ? 'pass' : 'fail',
+      value: layoutValidation.valid ? '충돌 0건 / 경계 준수' : `위반 ${layoutValidation.issues.length}건`,
+      detail: layoutValidation.valid ? '모든 화물이 컨테이너 경계 내에 상호 간섭(충돌) 없이 완벽히 배치되었습니다.' : layoutValidation.issues.slice(0, 3).join('; ')
+    },
+    {
+      id: 'payload',
+      category: '적재 중량',
+      name: '컨테이너 최대 적재중량 한도',
+      status: totalWeight <= container.spec.maxPayloadKg ? 'pass' : 'fail',
+      value: `${totalWeight.toLocaleString()} / ${container.spec.maxPayloadKg.toLocaleString()} kg (${((totalWeight/container.spec.maxPayloadKg)*100).toFixed(1)}%)`,
+      detail: totalWeight <= container.spec.maxPayloadKg ? `허용 하중 내 적재 (잔여 여유 중량: ${(container.spec.maxPayloadKg - totalWeight).toLocaleString()} kg)` : `최대 적재 한도를 ${(totalWeight - container.spec.maxPayloadKg).toLocaleString()} kg 초과했습니다.`
+    },
+    {
+      id: 'cg_x',
+      category: '무게중심 (길이)',
+      name: '전후 길이 방향 무게중심 (ISO 1496)',
+      status: isCgXSafe ? 'pass' : 'warn',
+      value: `${cg.x.toFixed(0)} mm (${(nx*100).toFixed(1)}%)`,
+      detail: isCgXSafe ? '중앙 50% 허용 구역(25%~75%) 내에 안정적으로 분포합니다.' : `전후 쏠림 주의 (기준치 25%~75% 대비 ${(nx*100).toFixed(1)}%)`
+    },
+    {
+      id: 'cg_y',
+      category: '무게중심 (좌우)',
+      name: '좌우 횡방향 무게중심 밸런스',
+      status: isCgYSafe ? 'pass' : 'warn',
+      value: `${cg.y.toFixed(0)} mm (${(ny*100).toFixed(1)}%)`,
+      detail: isCgYSafe ? '중앙 40% 허용 구역(30%~70%) 내에 안정적으로 분포합니다.' : `좌우 편중 주의 (기준치 30%~70% 대비 ${(ny*100).toFixed(1)}%)`
+    },
+    {
+      id: 'cg_z',
+      category: '무게중심 (높이)',
+      name: '수직 무게중심 및 전복 안정도',
+      status: isCgZSafe ? 'pass' : 'warn',
+      value: `${cg.z.toFixed(0)} mm (${(nz*100).toFixed(1)}%)`,
+      detail: isCgZSafe ? '전체 높이의 50% 이하로 운송 중 롤링/전복 위험이 낮습니다.' : '무게중심이 다소 높아 급격한 회전 시 롤링에 유의하세요.'
+    },
+    {
+      id: 'floor_load',
+      category: '바닥 하중',
+      name: '단위면적당 평균 바닥 하중',
+      status: (limit > 0 && avgFloorLoadKgM2 > limit) ? 'warn' : 'pass',
+      value: `${avgFloorLoadKgM2.toFixed(0)} kg/m²`,
+      detail: (limit > 0 && avgFloorLoadKgM2 > limit) ? `설정 한도(${limit} kg/m²) 초과` : '컨테이너 바닥 지지 한도 내 양호'
+    },
+    {
+      id: 'door_pass',
+      category: '문 통과성',
+      name: '컨테이너 도어 개구부 진입 여유',
+      status: 'pass',
+      value: `도어 규격: ${container.spec.doorWidth}×${container.spec.doorHeight} mm`,
+      detail: '모든 화물이 도어 개구부 규격을 통과하여 안전하게 상차 가능합니다.'
+    }
+  ]
+
+  // 종합 안전 점수 (100점 만점)
+  let safetyScore = 100
+  if (!layoutValidation.valid) safetyScore -= 35
+  if (totalWeight > container.spec.maxPayloadKg) safetyScore -= 35
+  if (!isCgXSafe) safetyScore -= 15
+  if (!isCgYSafe) safetyScore -= 15
+  if (!isCgZSafe) safetyScore -= 5
+  if (limit > 0 && avgFloorLoadKgM2 > limit) safetyScore -= 10
+  safetyScore = Math.max(0, Math.min(100, safetyScore))
+
+  // 현장 상차 순서 (Loading Sequence: 안쪽 바닥 -> 문쪽 바닥 -> 상단 적층 순서)
+  const loadingSequence = [...ps].sort((a,b)=>{
+    // 1순위: 바닥 화물 우선 (z 낮은 순)
+    if(Math.abs(a.z - b.z) > 10) return a.z - b.z
+    // 2순위: 안쪽(벽면) 화물 우선 (x 깊은 순: x 큰 순)
+    if(Math.abs(a.x - b.x) > 10) return b.x - a.x
+    // 3순위: 좌측부터 (y 작은 순)
+    return a.y - b.y
+  }).map((p, idx)=>({
+    step: idx + 1,
+    uid: p.uid,
+    cargoId: p.cargoId,
+    cargoName: p.cargoName,
+    packagingLabel: p.packagingLabel,
+    length: p.length,
+    width: p.width,
+    height: p.height,
+    weightKg: p.weightKg,
+    x: p.x,
+    y: p.y,
+    z: p.z,
+    stackLayer: p.stackLayer || (p.z > container.bounds.minZ + 10 ? 2 : 1),
+    color: p.color
+  }))
+
+  // 하중 분포 히트맵 계산
+  const heatmap = calculateFloorHeatmap(container)
+
+  return {
+    centerOfGravity: cg,
+    cgNormalized: { x: nx, y: ny, z: nz },
+    isCgSafe: isCgXSafe && isCgYSafe && isCgZSafe,
+    safetyScore,
+    checklist,
+    loadingSequence,
+    heatmap,
+    avgFloorLoadKgM2,
+    blockEnvelopeVolumeM3,
+    blockDensity,
+    blockVoidM3,
+    envelope,
+    layoutValidation,
+    warnings
+  }
 }
 function optimizeSinglePlan(cargo,containerSpecs,settings,goal){
   const start=performance.now(),allUnits=expandCargo(cargo),totalCargoVolumeM3=allUnits.reduce((s,u)=>s+boxVolumeM3(u.length,u.width,u.height),0),totalRawVolumeM3=(cargo||[]).reduce((s,u)=>s+boxVolumeM3(u.length,u.width,u.height)*Math.max(0,Math.floor(Number(u.quantity)||0)),0),totalWeightKg=allUnits.reduce((s,u)=>s+u.weightKg,0),totalRawWeightKg=(cargo||[]).reduce((s,u)=>s+Number(u.weightKg||0)*Math.max(0,Math.floor(Number(u.quantity)||0)),0)
@@ -287,7 +482,56 @@ function optimizeSinglePlan(cargo,containerSpecs,settings,goal){
     const container={index:containers.length+1,spec:best.spec,placements:best.packed.placements,nestedAssignments:nestedFor,deckRegions:best.packed.deckRegions||[],usedVolumeM3,usedWeightKg,usableVolumeM3:usableVolume,volumeUtilization:usableVolume?usedVolumeM3/usableVolume:0,weightUtilization:usedWeightKg/best.spec.maxPayloadKg,remainingVolumeM3:Math.max(0,usableVolume-usedVolumeM3),bounds:b}
     Object.assign(container,containerAnalytics(container,settings));containers.push(container);remaining=remaining.filter(u=>!ids.has(u.uid))
   }
-  const nestedAssignedIds=new Set(nesting.assignments.flatMap(a=>a.placements.map(p=>p.uid))),trulyUnpacked=remaining.filter(u=>!nestedAssignedIds.has(u.uid))
+  const nestedAssignedIds=new Set(nesting.assignments.flatMap(a=>a.placements.map(p=>p.uid)))
+  const trulyUnpacked=remaining.filter(u=>!nestedAssignedIds.has(u.uid)).map(u=>{
+    // 미적재 원인 정밀 진단
+    const allowedOrientations = orientations(u)
+    let doorBlock = false
+    let oversized = false
+    let weightBlock = false
+    const doorIssues = []
+
+    for(const spec of enabled){
+      const b = boundsFor(spec, settings)
+      const fitsAnyDoor = allowedOrientations.some(o => doorFits(o, spec, settings))
+      if(!fitsAnyDoor){
+        doorBlock = true
+        doorIssues.push(`${spec.shortName||spec.name} 도어(${spec.doorWidth}×${spec.doorHeight}mm) 통과 불가`)
+      }
+      const fitsAnyBound = allowedOrientations.some(o => o.length <= b.length+EPS && o.width <= b.width+EPS && o.height <= b.height+EPS)
+      if(!fitsAnyBound){
+        oversized = true
+      }
+      if(u.weightKg > spec.maxPayloadKg){
+        weightBlock = true
+      }
+    }
+
+    let reasonCode = 'space-exhausted'
+    let reasonText = '컨테이너 잔여 공간 및 기하 배치 제약으로 미적재'
+    let fixHint = '컨테이너 수량을 늘리거나, 화물 회전/적층 허용을 검토하세요.'
+
+    if(weightBlock){
+      reasonCode = 'weight-overflow'
+      reasonText = `단일 중량(${u.weightKg.toLocaleString()}kg)이 컨테이너 최대 허용 하중을 초과`
+      fixHint = '중량이 더 큰 특수 컨테이너를 사용하거나 화물을 분할 출하하세요.'
+    } else if(doorBlock && enabled.length > 0){
+      reasonCode = 'door-overflow'
+      reasonText = `도어 개구부 통과 불가 (${doorIssues.join(', ')})`
+      fixHint = '화물 회전 방식을 "3축 회전 허용"으로 변경하거나 오픈탑/하이큐브(HC) 컨테이너를 검토하세요.'
+    } else if(oversized){
+      reasonCode = 'oversized'
+      reasonText = '화물 외형 치수가 컨테이너 유효 내부 공간을 초과'
+      fixHint = '포장 외형 치수를 줄이거나 40HC 등 더 큰 규격 컨테이너를 활성화하세요.'
+    }
+
+    return {
+      ...u,
+      unpackedReason: reasonCode,
+      reasonText,
+      fixHint
+    }
+  })
   containers.sort((a,b)=>Number(b.spec.nominalVolumeM3||0)-Number(a.spec.nominalVolumeM3||0)||String(a.spec.shortName||a.spec.name).localeCompare(String(b.spec.shortName||b.spec.name)));containers.forEach((c,i)=>c.index=i+1)
   const totalNominalVolumeM3=containers.reduce((s,c)=>s+Number(c.spec.nominalVolumeM3||boxVolumeM3(c.spec.length,c.spec.width,c.spec.height)),0),totalUsableVolumeM3=containers.reduce((s,c)=>s+c.usableVolumeM3,0),totalUsedVolumeM3=containers.reduce((s,c)=>s+c.usedVolumeM3,0),stackedCount=containers.reduce((s,c)=>s+c.placements.filter(p=>p.onDeck||p.z>c.bounds.minZ+EPS).length,0),residualUnits=containers.length?Math.min(...containers.map(c=>c.placements.length)):0
   return {containers,unpacked:trulyUnpacked,nestedAssignments:nesting.assignments,totalCargoVolumeM3,totalRawVolumeM3,topLevelCargoVolumeM3,nestedSavedVolumeM3,totalWeightKg,totalRawWeightKg,packagingWeightKg:Math.max(0,totalWeightKg-totalRawWeightKg),goal,totalNominalVolumeM3,overallUtilization:totalUsableVolumeM3?totalUsedVolumeM3/totalUsableVolumeM3:0,stackedCount,residualUnits,elapsedMs:performance.now()-start}

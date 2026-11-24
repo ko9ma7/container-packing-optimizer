@@ -1,5 +1,6 @@
 import { defaultContainers, sampleCargo, defaultSettings, presetSettings, packagingPresets } from './defaults.js'
 import { boxVolumeM3, packedDimensions, packedWeightKg, optimizePacking } from './packing-fast.js'
+import { Container3DViewer } from './viewer-3d.js'
 
 const STORAGE_KEY='container-fit-project-v10'
 const OLD_STORAGE_KEYS=['container-fit-project-v9','container-fit-project-v8','container-fit-project-v7','container-fit-project-v6','container-fit-project-v5','container-fit-project-v4','container-fit-project-v3','container-fit-project-v2','container-fit-project-v1']
@@ -91,7 +92,27 @@ function normalizeSettings(s={}){
   return base
 }
 
-let state={containers:clone(defaultContainers),cargo:[],settings:clone(defaultSettings),result:null,openResult:0,mobileNav:false,modal:null,viewMode:'iso',calculating:false,calcMessage:''}
+let state={
+  containers:clone(defaultContainers),
+  cargo:[],
+  settings:clone(defaultSettings),
+  result:null,
+  openResult:0,
+  mobileNav:false,
+  modal:null,
+  manualTab:'workflow',
+  seqFilter:'',
+  maximizedContainer:null,
+  viewMode:'3d-orbit',
+  containerTabs:{},
+  containerSteps:{},
+  layers:{ cg:true, heatmap:false, clearances:false, support:true },
+  selectedPlacement:null,
+  calculating:false,
+  calcMessage:''
+}
+const viewersMap = new Map()
+let stepPlayerTimer = null
 try{
   const current=localStorage.getItem(STORAGE_KEY),legacy=OLD_STORAGE_KEYS.map(k=>localStorage.getItem(k)).find(Boolean);const saved=JSON.parse(current||legacy||'null')
   if(saved?.containers&&saved?.cargo&&saved?.settings){const migrated=!current;state={...state,containers:saved.containers,cargo:migrateKnownExampleRoles(saved.cargo.map(x=>normalizeCargoItem(x,{resetLegacyOrientation:num(saved.version)<4})),saved.version),settings:normalizeSettings({...saved.settings,...(migrated&&num(saved.version)<4?{optimizationGoal:'auto'}:{})})}}
@@ -179,9 +200,328 @@ function visualizeSide(container){
   return `<svg viewBox="0 0 ${vw} ${vh}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${esc(spec.name)} 측면 적층 배치" class="load-svg"><rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#f8fbfd" stroke="#6689a4" stroke-width="2" rx="4"/>${boxes}<text x="${x}" y="${Math.max(18,y-10)}" class="plan-label">측면 X-Z · 적층 높이 확인 / ${fmtInt(spec.length)} × ${fmtInt(spec.height)} mm</text></svg>`
 }
 
+function renderViewerTab(container){
+  const legend=[...new Map(container.placements.map(p=>[p.cargoId,p])).values()].map(p=>`<span class="legend-chip"><i style="background:${p.color}"></i>${esc(p.cargoName)}</span>`).join('')
+  const seq = container.loadingSequence || []
+  const maxStep = Math.max(0, seq.length - 1)
+  const currentStep = state.containerSteps[container.index] ?? -1
+  const activeStepItem = (currentStep >= 0 && currentStep < seq.length) ? seq[currentStep] : null
+  const isOrbit = (state.viewMode === '3d-orbit')
+  const isMaximized = (state.maximizedContainer === container.index)
+
+  const canvasContent = isOrbit
+    ? `<div class="canvas-3d-wrap ${isMaximized?'is-maximized':''}">
+         <canvas class="canvas-3d" data-container-index="${container.index}"></canvas>
+         <div class="canvas-3d-hint">
+           <span>🖱️ 좌클릭: 360° 회전</span>
+           <span>휠: 줌</span>
+           <span>우클릭/Shift: 이동</span>
+           <span>화물 클릭: 제원 확인</span>
+         </div>
+       </div>`
+    : state.viewMode === 'top' ? visualizeTop(container) : visualizeSide(container)
+
+  const selectedP = state.selectedPlacement
+  const selectedInfo = (selectedP && container.placements.some(p => p.uid === selectedP.uid)) ? `
+    <div class="selected-cargo-card">
+      <div class="selected-cargo-meta">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <i style="width:12px; height:12px; border-radius:3px; background:${selectedP.color};"></i>
+          <strong>${esc(selectedP.cargoName)} <small>(${esc(selectedP.uid)})</small></strong>
+        </div>
+        <span>포장 외형: <b>${fmtInt(selectedP.length)} × ${fmtInt(selectedP.width)} × ${fmtInt(selectedP.height)} mm</b> · 단위중량 <b>${fmt(selectedP.weightKg)} kg</b> · ${esc(selectedP.packagingLabel)} · ${selectedP.stackLayer > 1 ? '2단 상부 적층' : '1단 바닥 적재'}</span>
+      </div>
+      <div class="selected-cargo-coords">
+        <code>X: ${Math.round(selectedP.x)} mm</code> · <code>Y: ${Math.round(selectedP.y)} mm</code> · <code>Z: ${Math.round(selectedP.z)} mm</code>
+      </div>
+      <button class="button button--small button--ghost" data-action="clear-selected-cargo" style="padding:4px 8px;">닫기</button>
+    </div>
+  ` : ''
+
+  return `
+    <div class="visualizer-wrap">
+      <div class="visualizer-toolbar visualizer-toolbar--advanced">
+        <div class="toolbar-group">
+          <span class="toolbar-label">보기 모드:</span>
+          <div class="view-switch">
+            <button class="${state.viewMode==='3d-orbit'?'is-active':''}" data-action="view-mode" data-id="3d-orbit">🪐 3D 자유 회전</button>
+            <button class="${state.viewMode==='top'?'is-active':''}" data-action="view-mode" data-id="top">📐 평면도 (Top)</button>
+            <button class="${state.viewMode==='side'?'is-active':''}" data-action="view-mode" data-id="side">📏 측면도 (Side)</button>
+          </div>
+        </div>
+        ${isOrbit ? `
+          <div class="toolbar-group">
+            <span class="toolbar-label">3D 시점:</span>
+            <button class="preset-btn" data-action="orbit-preset" data-id="iso" data-container="${container.index}">기본 3D</button>
+            <button class="preset-btn" data-action="orbit-preset" data-id="top" data-container="${container.index}">상부</button>
+            <button class="preset-btn" data-action="orbit-preset" data-id="side" data-container="${container.index}">측면</button>
+            <button class="preset-btn" data-action="orbit-preset" data-id="front" data-container="${container.index}">도어측</button>
+            <button class="preset-btn" data-action="orbit-preset" data-id="reset" data-container="${container.index}">초기화</button>
+            <button class="preset-btn ${isMaximized?'is-active':''}" data-action="toggle-maximize" data-container="${container.index}" title="화면 크기 확대/축소">${icon('eye', 14)} ${isMaximized?'기본 크기':'화면 확대'}</button>
+          </div>
+          <div class="toolbar-group">
+            <span class="toolbar-label">검증 레이어:</span>
+            <button class="layer-chip ${state.layers.cg?'is-active':''}" data-action="toggle-layer" data-layer="cg">🎯 무게중심 CG</button>
+            <button class="layer-chip ${state.layers.heatmap?'is-active':''}" data-action="toggle-layer" data-layer="heatmap">🌡️ 바닥하중 맵</button>
+            <button class="layer-chip ${state.layers.clearances?'is-active':''}" data-action="toggle-layer" data-layer="clearances">📏 여유공간</button>
+          </div>
+        ` : ''}
+      </div>
+
+      <div class="visualizer-canvas" style="height:auto; min-height:420px; background:transparent;">
+        ${canvasContent}
+      </div>
+
+      <!-- Step Simulator Bar -->
+      <div class="step-player-bar">
+        <div class="step-controls">
+          <button class="step-btn" title="처음으로" data-action="step-first" data-container="${container.index}">⏮</button>
+          <button class="step-btn" title="이전 단계" data-action="step-prev" data-container="${container.index}">◀</button>
+          <button class="step-btn ${state.isPlayingStep?'is-active':''}" title="${state.isPlayingStep?'일시정지':'순서대로 재생'}" data-action="step-play-toggle" data-container="${container.index}">
+            ${state.isPlayingStep?'⏸ 일시정지':'▶ 순차 재생'}
+          </button>
+          <button class="step-btn" title="다음 단계" data-action="step-next" data-container="${container.index}">▶</button>
+          <button class="step-btn" title="전체 보기" data-action="step-all" data-container="${container.index}">전체</button>
+        </div>
+        <div class="step-slider-wrap">
+          <span class="step-badge">${currentStep === -1 ? `전체 적재 (${seq.length}개)` : `Step ${currentStep + 1} / ${seq.length}`}</span>
+          <input type="range" class="step-slider" min="-1" max="${maxStep}" value="${currentStep}" data-container="${container.index}">
+          <div class="step-info-text">
+            ${activeStepItem ? `<b>${esc(activeStepItem.cargoName)}</b> (${activeStepItem.length}×${activeStepItem.width}×${activeStepItem.height}mm, ${activeStepItem.weightKg}kg) → 위치: X=${Math.round(activeStepItem.x)}, Y=${Math.round(activeStepItem.y)}, Z=${Math.round(activeStepItem.z)} (${activeStepItem.stackLayer > 1 ? '2단 상부' : '1단 바닥'})` : '전체 화물이 적재된 상태입니다. 슬라이더나 재생 버튼으로 지게차 상차 순서를 시뮬레이션하세요.'}
+          </div>
+        </div>
+      </div>
+
+      ${selectedInfo}
+
+      <div class="visualizer-legend">${legend}</div>
+    </div>
+  `
+}
+
+function renderComplianceTab(container){
+  const cg = container.centerOfGravity || { x:0, y:0, z:0 }
+  const nx = container.cgNormalized?.x ?? (container.spec.length ? cg.x / container.spec.length : 0.5)
+  const ny = container.cgNormalized?.y ?? (container.spec.width ? cg.y / container.spec.width : 0.5)
+  const nz = container.cgNormalized?.z ?? (container.spec.height ? cg.z / container.spec.height : 0.5)
+
+  const score = container.safetyScore ?? 95
+  const scoreClass = score >= 90 ? 'pass' : score >= 70 ? 'warn' : 'fail'
+  const scoreColor = score >= 90 ? '#10b981' : score >= 70 ? '#f59e0b' : '#ef4444'
+  const scoreLabel = score >= 90 ? '🟢 출하 적합 (안전)' : score >= 70 ? '🟡 조건부 적합 (주의)' : '🔴 재배치 필요 (위험)'
+  const scoreCircumference = 2 * Math.PI * 46
+  const scoreDashOffset = scoreCircumference - (scoreCircumference * score / 100)
+
+  const weightMarginRatio = Math.max(0, (container.spec.maxPayloadKg - container.usedWeightKg) / container.spec.maxPayloadKg)
+  const scoreWeight = Math.round(weightMarginRatio * 30)
+  const scoreCgX = (nx >= 0.25 && nx <= 0.75) ? 25 : Math.max(0, Math.round(25 - Math.abs(nx - 0.5) * 50))
+  const scoreCgY = (ny >= 0.30 && ny <= 0.70) ? 25 : Math.max(0, Math.round(25 - Math.abs(ny - 0.5) * 60))
+  const scoreFloor = (container.avgFloorLoadKgM2 < 2000) ? 20 : 12
+
+  const checklist = container.checklist || []
+
+  return `
+    <div class="compliance-panel">
+      <div class="compliance-summary-grid">
+        <div class="safety-score-card">
+          <div class="score-dial-svg-wrap">
+            <svg viewBox="0 0 110 110" class="score-svg">
+              <circle cx="55" cy="55" r="46" fill="none" stroke="#e2e8f0" stroke-width="9"/>
+              <circle cx="55" cy="55" r="46" fill="none" stroke="${scoreColor}" stroke-width="9"
+                stroke-dasharray="${scoreCircumference.toFixed(1)}" stroke-dashoffset="${scoreDashOffset.toFixed(1)}"
+                stroke-linecap="round" transform="rotate(-90 55 55)"/>
+              <text x="55" y="52" text-anchor="middle" dominant-baseline="middle" class="score-svg-val">${score}</text>
+              <text x="55" y="70" text-anchor="middle" dominant-baseline="middle" class="score-svg-sub">/ 100 점</text>
+            </svg>
+          </div>
+          <div class="score-title">물리 & 규정 종합 안전 점수</div>
+          <div class="score-badge score-badge--${scoreClass}">${scoreLabel}</div>
+          <div class="score-breakdown-chips">
+            <span title="최대적재중량 대비 잔여 여유율">중량 여유 <b>${scoreWeight}/30</b></span>
+            <span title="X축 전후 무게중심 균형">종방향 CG <b>${scoreCgX}/25</b></span>
+            <span title="Y축 좌우 무게중심 밸런스">횡방향 CG <b>${scoreCgY}/25</b></span>
+            <span title="바닥 하중 분산 균일도">하중 분산 <b>${scoreFloor}/20</b></span>
+          </div>
+        </div>
+
+        <div class="balance-card">
+          <div class="balance-title">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span><b>무게중심(C.G.) 밸런스 인디케이터</b> (ISO 1496 규격)</span>
+              <button class="button button--small button--ghost" data-action="open-manual" data-tab="safety" style="padding:2px 8px; font-size:11px;">기준 설명</button>
+            </div>
+            <small style="color:#64748b;">중앙 녹색 안전 구역 내 위치 권장</small>
+          </div>
+
+          <div class="balance-bar-wrap">
+            <div class="balance-bar-label">
+              <span><b>길이 방향 (X축):</b> ${cg.x.toFixed(0)} mm (${(nx*100).toFixed(1)}%) · 컨테이너 중심 대비 ${Math.abs(cg.x - container.spec.length/2).toFixed(0)} mm 편차</span>
+              <span>도어측 0% ─── 중앙 안전 영역 (25% ~ 75%) ─── 안쪽 끝벽 100%</span>
+            </div>
+            <div class="balance-track">
+              <div class="balance-safe-zone" style="left:25%; width:50%;" title="ISO 1496 길이방향 권장영역"></div>
+              <div class="balance-pointer" style="left:${Math.max(2, Math.min(98, nx*100))}%;" title="현재 무게중심 X위치"></div>
+            </div>
+          </div>
+
+          <div class="balance-bar-wrap">
+            <div class="balance-bar-label">
+              <span><b>좌우 방향 (Y축):</b> ${cg.y.toFixed(0)} mm (${(ny*100).toFixed(1)}%) · 중앙선 대비 ${Math.abs(cg.y - container.spec.width/2).toFixed(0)} mm 편차</span>
+              <span>좌측벽 0% ─── 중앙 밸런스 영역 (30% ~ 70%) ─── 우측벽 100%</span>
+            </div>
+            <div class="balance-track">
+              <div class="balance-safe-zone" style="left:30%; width:40%;" title="ISO 1496 좌우 밸런스 영역"></div>
+              <div class="balance-pointer" style="left:${Math.max(2, Math.min(98, ny*100))}%;" title="현재 무게중심 Y위치"></div>
+            </div>
+          </div>
+
+          <div class="balance-footer-stats">
+            <span>수직 중심고 (Z축): <b>${cg.z.toFixed(0)} mm</b> (${(nz*100).toFixed(1)}% / 50% 이하 안전)</span>
+            <span>평균 바닥하중: <b>${fmtInt(container.avgFloorLoadKgM2)} kg/m²</b></span>
+            <span>최대 셀 집중하중: <b>${fmtInt(container.heatmap?.maxCellLoad || container.avgFloorLoadKgM2)} kg/m²</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="checklist-section-title">
+        <div style="display:flex; align-items:center; gap:8px;">
+          ${icon('check', 18)}
+          <span><b>ISO 1496 및 물류 현장 7대 핵심 안전 기준 검증표</b></span>
+        </div>
+        <span class="checklist-pass-count">${checklist.filter(c=>c.status==='pass').length} / ${checklist.length} 항목 적합</span>
+      </div>
+
+      <div class="checklist-grid">
+        ${checklist.map(item => `
+          <div class="check-card check-card--${item.status}">
+            <div class="check-card__head">
+              <span class="check-category">${esc(item.category)}</span>
+              <span class="check-status-badge check-status-badge--${item.status}">${item.status === 'pass' ? '✓ PASS' : item.status === 'warn' ? '⚠ WARN' : '✕ FAIL'}</span>
+            </div>
+            <strong>${esc(item.name)}</strong>
+            <div class="check-value">${esc(item.value)}</div>
+            <div class="check-detail">${esc(item.detail)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderSequenceTab(container){
+  const seq = container.loadingSequence || []
+  const filter = (state.seqFilter || '').trim().toLowerCase()
+  const filteredSeq = filter
+    ? seq.filter(s => s.cargoName.toLowerCase().includes(filter) || s.packagingLabel.toLowerCase().includes(filter))
+    : seq
+  let accWeight = 0
+
+  return `
+    <div class="sequence-panel">
+      <!-- Print-only header -->
+      <div class="print-only print-dispatch-header">
+        <div class="print-dispatch-title">현장 컨테이너 상차 작업 지시서 (Loading Sequence Manifest)</div>
+        <div class="print-dispatch-meta">
+          <div><b>컨테이너:</b> ${esc(container.spec.name)} (No. ${container.index + 1})</div>
+          <div><b>총 화물 수:</b> ${container.placements.length}개</div>
+          <div><b>총 적재 중량:</b> ${fmtInt(container.usedWeightKg)} kg / 최대 ${fmtInt(container.spec.maxPayloadKg)} kg</div>
+          <div><b>종합 안전점수:</b> ${container.safetyScore}점 (${container.safetyScore >= 90 ? '출하 적합' : '주의'})</div>
+          <div><b>출력 일시:</b> ${new Date().toLocaleString('ko-KR')}</div>
+        </div>
+      </div>
+
+      <div class="sequence-banner no-print">
+        <div>
+          <strong>📋 현장 지게차 & 크레인 상차 순서 지시서 (Loading Sequence)</strong>
+          <span>컨테이너 안쪽 끝벽 바닥(X min)부터 입구 방향으로 차례대로 안전하게 적재하도록 최적화된 순서입니다.</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="button button--soft button--small" onclick="window.print()">${icon('sheet',16)} 지시서 인쇄</button>
+        </div>
+      </div>
+
+      <div class="seq-filter-bar no-print">
+        <input type="search" class="seq-search-input" data-container="${container.index}" placeholder="🔍 화물명 또는 포장 방식 검색..." value="${esc(state.seqFilter || '')}">
+        ${state.seqFilter ? `<button class="button button--small button--ghost" data-action="clear-seq-filter">초기화</button>` : ''}
+        <span class="seq-filter-info">표시: ${filteredSeq.length} / 총 ${seq.length}개 단위</span>
+      </div>
+
+      <div class="table-scroll">
+        <table class="seq-table">
+          <thead>
+            <tr>
+              <th style="width:50px;">순번</th>
+              <th>화물명</th>
+              <th>포장 사양</th>
+              <th>외형 치수 (L × W × H mm)</th>
+              <th>단위 중량</th>
+              <th>상차 좌표 (X, Y, Z mm)</th>
+              <th>적재 층수</th>
+              <th>누적 중량</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredSeq.map((item) => {
+              accWeight += item.weightKg
+              const isSelected = state.selectedPlacement?.uid === item.uid
+              return `
+                <tr class="seq-row ${isSelected ? 'is-selected' : ''}" data-action="jump-to-step" data-container="${container.index}" data-step="${item.step - 1}" data-uid="${esc(item.uid)}" title="클릭 시 3D 뷰어에서 이 단계를 표시합니다">
+                  <td><span class="seq-step-pill">${item.step}</span></td>
+                  <td>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <i style="width:11px; height:11px; border-radius:3px; background:${item.color}; border:1px solid rgba(0,0,0,0.15);"></i>
+                      <b>${esc(item.cargoName)}</b>
+                    </div>
+                  </td>
+                  <td>${esc(item.packagingLabel)}</td>
+                  <td>${fmtInt(item.length)} × ${fmtInt(item.width)} × ${fmtInt(item.height)}</td>
+                  <td>${fmt(item.weightKg)} kg</td>
+                  <td><code>X:${Math.round(item.x)} Y:${Math.round(item.y)} Z:${Math.round(item.z)}</code></td>
+                  <td>
+                    <span class="seq-stack-badge seq-stack-badge--${item.stackLayer}">
+                      ${item.stackLayer > 1 ? '2단 상부' : '1단 바닥'}
+                    </span>
+                  </td>
+                  <td><b>${fmtInt(accWeight)} kg</b></td>
+                </tr>
+              `
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Print-only signature block -->
+      <div class="print-only print-signatures">
+        <div class="print-sign-box">
+          <span>현장 적재 책임자 (검수):</span>
+          <div class="sign-line">성명: ________________ (서명)</div>
+        </div>
+        <div class="print-sign-box">
+          <span>지게차 / 크레인 기사 (작업):</span>
+          <div class="sign-line">성명: ________________ (서명)</div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function visualizer(container){
-  const legend=[...new Map(container.placements.map(p=>[p.cargoId,p])).values()].map(p=>`<span><i style="background:${p.color}"></i>${esc(p.cargoName)}</span>`).join('')
-  return `<div class="visualizer-wrap"><div class="visualizer-toolbar"><div><strong>${esc(container.spec.shortName)} · Container ${String(container.index).padStart(2,'0')}</strong><span>내측 ${fmtInt(container.spec.length)} × ${fmtInt(container.spec.width)} × ${fmtInt(container.spec.height)} mm</span></div><div class="view-switch"><button class="${state.viewMode==='iso'?'is-active':''}" data-action="view-mode" data-id="iso">3D 등각</button><button class="${state.viewMode==='top'?'is-active':''}" data-action="view-mode" data-id="top">평면</button><button class="${state.viewMode==='side'?'is-active':''}" data-action="view-mode" data-id="side">측면 적층</button></div></div><div class="visualizer-canvas">${state.viewMode==='top'?visualizeTop(container):state.viewMode==='side'?visualizeSide(container):visualizeIso(container)}</div><div class="visualizer-legend">${legend}</div></div>`
+  const activeTab = state.containerTabs[container.index] || 'viewer'
+
+  return `
+    <div class="container-tabs no-print">
+      <button class="container-tab-btn ${activeTab==='viewer'?'is-active':''}" data-action="container-tab" data-tab="viewer" data-container="${container.index}">
+        ${icon('box', 16)} 3D / 2D 적재 배치도
+      </button>
+      <button class="container-tab-btn ${activeTab==='compliance'?'is-active':''}" data-action="container-tab" data-tab="compliance" data-container="${container.index}">
+        ${icon('check', 16)} 물리 & 규정 안전성 정밀 검증 센터
+      </button>
+      <button class="container-tab-btn ${activeTab==='sequence'?'is-active':''}" data-action="container-tab" data-tab="sequence" data-container="${container.index}">
+        ${icon('layers', 16)} 현장 상차 순서 지시서 (${container.placements.length}단계)
+      </button>
+    </div>
+    ${activeTab === 'compliance' ? renderComplianceTab(container) : activeTab === 'sequence' ? renderSequenceTab(container) : renderViewerTab(container)}
+  `
 }
 function groupPlacements(container){const m=new Map();container.placements.forEach(p=>{const g=m.get(p.cargoId)||{name:p.cargoName,package:p.packagingLabel,count:0,weight:0,volume:0};g.count++;g.weight+=p.weightKg;g.volume+=boxVolumeM3(p.length,p.width,p.height);m.set(p.cargoId,g)});return [...m.values()]}
 
@@ -191,21 +531,413 @@ function nestedMini(a){
   return `<svg class="nested-mini-svg" viewBox="0 0 ${vw} ${vh}" role="img" aria-label="${esc(a.hostCargoName)} 내부 적재 평면"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4" fill="#f7fcfa" stroke="#2d9d78" stroke-width="2"/>${boxes}<text x="${x+6}" y="${Math.max(12,y-3)}" class="nested-mini-label">내측 ${fmtInt(a.innerLength)} × ${fmtInt(a.innerWidth)} mm</text></svg>`
 }
 
+function unpackedDiagnosticsHtml(unpacked){
+  if(!unpacked||!unpacked.length) return ''
+  return `
+    <div class="warning-banner" style="display:block; padding:14px 16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          ${icon('alert', 22)}
+          <div>
+            <strong style="font-size:13.5px; color:#9a3412;">총 ${unpacked.length}개 화물이 설정된 제약조건으로 인해 적재되지 못했습니다.</strong>
+            <span style="font-size:11.5px; color:#c2410c; display:block;">물리 규격, 도어 개구부, 또는 컨테이너 최대 적재중량 제약으로 미적재된 화물의 정밀 원인입니다.</span>
+          </div>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="button button--small button--soft" data-action="add-container">${icon('plus', 14)} 컨테이너 추가</button>
+          <button class="button button--small button--ghost" data-action="open-manual" data-tab="rules">${icon('info', 14)} 회전/적층 가이드</button>
+        </div>
+      </div>
+      <div class="unpacked-diagnostic-list">
+        ${unpacked.map(u => {
+          let tagClass = 'tag--generic'
+          let tagText = '공간/기하 제약'
+          if(u.reasonText?.includes('도어')){ tagClass = 'tag--door'; tagText = '🚪 도어 개구부 초과'; }
+          else if(u.reasonText?.includes('중량') || u.reasonText?.includes('Payload')){ tagClass = 'tag--weight'; tagText = '⚖️ 허용 중량 초과'; }
+          else if(u.reasonText?.includes('치수') || u.reasonText?.includes('내측')){ tagClass = 'tag--size'; tagText = '📏 컨테이너 규격 초과'; }
+          return `
+          <div class="unpacked-diagnostic-item">
+            <div class="unpacked-diagnostic-item__head">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="diagnostic-tag ${tagClass}">${tagText}</span>
+                <strong>${esc(u.cargoName)} <small>(${esc(u.uid)})</small></strong>
+              </div>
+              <span class="status-chip" style="background:#fed7aa; color:#9a3412; font-weight:700;">${fmtInt(u.length)}×${fmtInt(u.width)}×${fmtInt(u.height)} mm · ${fmt(u.weightKg)} kg</span>
+            </div>
+            <div class="unpacked-reason">❌ <b>진단 사유:</b> ${esc(u.reasonText || '컨테이너 잔여 공간 및 기하 배치 제약으로 미적재')}</div>
+            <div class="unpacked-fix">💡 <b>해결 방안:</b> ${esc(u.fixHint || '화물 회전/적층 허용을 검토하거나 컨테이너 규격을 추가하세요.')}</div>
+          </div>
+        `}).join('')}
+      </div>
+    </div>
+  `
+}
+
 function resultsHtml(){
   const r=state.result
   if(!r)return `<section class="panel pre-result" id="results"><div class="pre-result__icon">${icon('layers',24)}</div><div><strong>아직 계산하지 않았습니다.</strong><span>포장 외형, 여유 공간, 내부 빈 공간 조건을 확인한 뒤 최적화 계산을 실행하세요.</span></div></section>`
   const totalUsable=r.containers.reduce((s,c)=>s+c.usableVolumeM3,0),totalUsed=r.containers.reduce((s,c)=>s+c.usedVolumeM3,0),totalPackedWeight=r.containers.reduce((s,c)=>s+c.usedWeightKg,0),nestedCount=r.nestedAssignments.reduce((s,a)=>s+a.placements.length,0),warnings=r.containers.reduce((s,c)=>s+c.warnings.length,0),zeroWeightTypes=state.cargo.filter(c=>packedWeightKg(c)<=0).length
   const containerRows=r.containers.map((container,idx)=>{
     const open=state.openResult===idx,grouped=groupPlacements(container),nested=container.nestedAssignments.length?`<div class="nested-list">${container.nestedAssignments.map(a=>{const gm=new Map();a.placements.forEach(p=>{const g=gm.get(p.cargoId)||{name:p.cargoName,count:0};g.count++;gm.set(p.cargoId,g)});return `<div class="nested-card"><div class="nested-card__meta"><div><strong>${esc(a.hostCargoName)}</strong><span>${esc(a.hostUid)} · ${accessLabel(a.access)}</span></div><b>${a.placements.length}개 내부 삽입</b><small>${a.usedVolumeM3.toFixed(2)} / ${a.availableVolumeM3.toFixed(2)} m³ · ${fmt(a.usedWeightKg)} kg</small><ul>${[...gm.values()].map(x=>`<li>${esc(x.name)} × ${x.count}</li>`).join('')}</ul></div>${nestedMini(a)}</div>`}).join('')}</div>`:'<div class="empty-mini">이 컨테이너에서는 화물 내부 공간을 사용하지 않았습니다.</div>'
-    return `<article class="container-result"><button class="container-result__head" data-action="toggle-result" data-index="${idx}" aria-expanded="${open}"><div><strong>Container ${String(container.index).padStart(2,'0')} · ${esc(container.spec.name)}</strong><span>${container.placements.length}개 외부 배치 · ${container.placements.filter(p=>p.onDeck||p.z>container.bounds.minZ+.001).length}개 상판/상부 적재 · 블록밀도 ${pct(container.blockDensity||0)} · ${container.layoutValidation?.valid!==false?'배치검증 통과':`검증 ${container.layoutValidation?.issues?.length||0}건`} · ${container.nestedAssignments.reduce((s,a)=>s+a.placements.length,0)}개 내부 삽입</span></div><div class="head-meters"><span>용적 <b>${pct(container.volumeUtilization)}</b></span><span>중량 <b>${pct(container.weightUtilization)}</b></span>${icon(open?'up':'down',18)}</div></button>${open?`<div class="container-result__body">${visualizer(container)}<div class="container-analytics"><div><span>무게중심 X</span><strong>${fmtInt(container.centerOfGravity.x)} mm</strong></div><div><span>무게중심 Y</span><strong>${fmtInt(container.centerOfGravity.y)} mm</strong></div><div><span>무게중심 Z</span><strong>${fmtInt(container.centerOfGravity.z)} mm</strong></div><div><span>평균 바닥하중</span><strong>${fmtInt(container.avgFloorLoadKgM2)} kg/m²</strong></div><div><span>블록 외곽 체적</span><strong>${num(container.blockEnvelopeVolumeM3).toFixed(2)} m³</strong></div><div><span>블록 내부 공극</span><strong>${num(container.blockVoidM3).toFixed(2)} m³</strong></div></div>${container.warnings.length?`<div class="container-warning">${icon('alert',18)}<div>${container.warnings.map(w=>`<span>${esc(w)}</span>`).join('')}</div></div>`:''}<div class="result-grid"><div class="result-table-wrap"><h3>외부 배치 화물</h3><table class="data-table compact"><thead><tr><th>화물</th><th>포장</th><th>수량</th><th>점유 용적</th><th>중량</th></tr></thead><tbody>${grouped.map(g=>`<tr><td>${esc(g.name)}</td><td>${esc(g.package)}</td><td>${g.count}</td><td>${g.volume.toFixed(2)} m³</td><td>${fmt(g.weight)} kg</td></tr>`).join('')}</tbody></table></div><div class="result-table-wrap"><h3>내부 빈 공간 활용</h3>${nested}</div></div><details class="placement-details"><summary>정확한 좌표 · 방향 · 포장 치수 보기</summary><div class="coordinates-grid">${container.placements.map(p=>`<div><strong>${esc(p.cargoName)}</strong><span>${esc(p.uid)} · ${esc(p.packagingLabel)}</span><code>X ${Math.round(p.x)} · Y ${Math.round(p.y)} · Z ${Math.round(p.z)}</code><small>${Math.round(p.length)} × ${Math.round(p.width)} × ${Math.round(p.height)} mm · ${esc(p.orientation)}</small></div>`).join('')}</div></details></div>`:''}</article>`
+    const score = container.safetyScore ?? 95
+    const scoreBadge = score >= 90 ? `<span class="score-pill score-pill--pass">🟢 출하 적합 (${score}점)</span>` : score >= 70 ? `<span class="score-pill score-pill--warn">🟡 조건부 (${score}점)</span>` : `<span class="score-pill score-pill--fail">🔴 위험 (${score}점)</span>`
+    return `<article class="container-result"><button class="container-result__head" data-action="toggle-result" data-index="${idx}" aria-expanded="${open}">
+      <div class="result-head-title">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <strong>Container ${String(container.index).padStart(2,'0')} · ${esc(container.spec.name)}</strong>
+          ${scoreBadge}
+        </div>
+        <span>${container.placements.length}개 외부 배치 · ${container.placements.filter(p=>p.onDeck||p.z>container.bounds.minZ+.001).length}개 상부 적층 · ${container.nestedAssignments.reduce((s,a)=>s+a.placements.length,0)}개 내부 삽입 · 총 ${fmtInt(container.usedWeightKg)} kg (최대 ${fmtInt(container.spec.maxPayloadKg)} kg)</span>
+      </div>
+      <div class="head-meters">
+        <div class="meter-box" title="체적 용적률">
+          <div class="meter-label"><span>용적</span><b>${pct(container.volumeUtilization)}</b></div>
+          <div class="meter-track"><div class="meter-bar" style="width:${Math.min(100, container.volumeUtilization*100)}%;"></div></div>
+        </div>
+        <div class="meter-box" title="적재 중량 한도 대비 사용률">
+          <div class="meter-label"><span>중량</span><b>${pct(container.weightUtilization)}</b></div>
+          <div class="meter-track"><div class="meter-bar ${container.weightUtilization>0.95?'meter-bar--danger':container.weightUtilization>0.85?'meter-bar--warn':''}" style="width:${Math.min(100, container.weightUtilization*100)}%;"></div></div>
+        </div>
+        ${icon(open?'up':'down',18)}
+      </div>
+    </button>${open?`<div class="container-result__body">${visualizer(container)}<div class="container-analytics"><div><span>무게중심 X</span><strong>${fmtInt(container.centerOfGravity.x)} mm</strong></div><div><span>무게중심 Y</span><strong>${fmtInt(container.centerOfGravity.y)} mm</strong></div><div><span>무게중심 Z</span><strong>${fmtInt(container.centerOfGravity.z)} mm</strong></div><div><span>평균 바닥하중</span><strong>${fmtInt(container.avgFloorLoadKgM2)} kg/m²</strong></div><div><span>블록 외곽 체적</span><strong>${num(container.blockEnvelopeVolumeM3).toFixed(2)} m³</strong></div><div><span>블록 내부 공극</span><strong>${num(container.blockVoidM3).toFixed(2)} m³</strong></div></div>${container.warnings.length?`<div class="container-warning">${icon('alert',18)}<div>${container.warnings.map(w=>`<span>${esc(w)}</span>`).join('')}</div></div>`:''}<div class="result-grid"><div class="result-table-wrap"><h3>외부 배치 화물 요약</h3><table class="data-table compact"><thead><tr><th>화물</th><th>포장</th><th>수량</th><th>점유 용적</th><th>중량</th></tr></thead><tbody>${grouped.map(g=>`<tr><td>${esc(g.name)}</td><td>${esc(g.package)}</td><td>${g.count}</td><td>${g.volume.toFixed(2)} m³</td><td>${fmt(g.weight)} kg</td></tr>`).join('')}</tbody></table></div><div class="result-table-wrap"><h3>내부 빈 공간 활용</h3>${nested}</div></div><details class="placement-details"><summary>정밀 좌표 · 배치 각도 · 포장 치수 전체 보기</summary><div class="coordinates-grid">${container.placements.map(p=>`<div><strong>${esc(p.cargoName)}</strong><span>${esc(p.uid)} · ${esc(p.packagingLabel)}</span><code>X ${Math.round(p.x)} · Y ${Math.round(p.y)} · Z ${Math.round(p.z)}</code><small>${Math.round(p.length)} × ${Math.round(p.width)} × ${Math.round(p.height)} mm · ${esc(p.orientation)}</small></div>`).join('')}</div></details></div>`:''}</article>`
   }).join('')
-  return `<section class="panel results-panel" id="results"><div class="section-head section-head--actions"><div><span class="section-number">5</span><div><h2>최적화 결과</h2><p>포장 후 외형과 작업 여유를 기준으로 컨테이너별 배치·중량·내부 공간 활용을 계산했습니다.</p></div></div><div class="button-row"><button class="button button--ghost" data-action="export-result-csv">${icon('download',16)} CSV</button><button class="button button--ghost" data-action="export-result-json">${icon('file',16)} JSON</button></div></div><div class="result-stats result-stats--six"><div class="metric">${icon('container',20)}<span>선정 컨테이너</span><strong>${r.containers.length}대</strong><small>${containerTypeSummary(r.containers.reduce((m,c)=>(m[c.spec.shortName]=(m[c.spec.shortName]||0)+1,m),{}))} · ${resultGoalLabel(r)}</small></div><div class="metric">${icon('calc',20)}<span>공간 활용률</span><strong>${pct(totalUsable?totalUsed/totalUsable:0)}</strong><small>설정 여유 제외 공간 기준</small></div><div class="metric">${icon('box',20)}<span>총 적재 중량</span><strong>${fmtInt(totalPackedWeight)} kg</strong><small>포장 자중 포함</small></div><div class="metric">${icon('package',20)}<span>포장 추가 체적</span><strong>${packagingAddedVolume().toFixed(2)} m³</strong><small>제품 실체적 대비 증가</small></div><div class="metric metric--accent">${icon('layers',20)}<span>내부 공간 활용</span><strong>${nestedCount}개</strong><small>${r.nestedSavedVolumeM3.toFixed(2)} m³ 외부 점유 절감</small></div><div class="metric ${warnings?'metric--warning':''}">${icon(warnings?'alert':'check',20)}<span>검토 경고</span><strong>${warnings}건</strong><small>무게중심·바닥하중 설정 기준</small></div></div>${r.unpacked.length?`<div class="warning-banner">${icon('alert',19)}<div><strong>${r.unpacked.length}개 화물을 현재 조건에서 적재하지 못했습니다.</strong><span>포장 외형, 문 개구부, 여유, 회전·적층 조건 또는 컨테이너 후보를 확인하세요.</span></div></div>`:''}${zeroWeightTypes?`<div class="info-banner">${icon('info',18)}<div><strong>단위중량이 0 kg인 품목이 ${zeroWeightTypes}종 있습니다.</strong><span>컨테이너 대수·공간 배치는 계산되지만 총중량, 무게중심(CG), 바닥하중은 실제 중량을 입력하기 전까지 참고용입니다.</span></div></div>`:''}${`<div class="result-assumption"><strong>현재 배치 가정</strong><span>프리셋 ${esc(state.settings.preset)} · 바닥 간격 ${fmtInt(state.settings.itemGap)} mm · 상부 간격 ${fmtInt(state.settings.stackItemGap||0)} mm · 지지율 ${Math.round(num(state.settings.supportRatio,.75)*100)}% · ${state.settings.blockContact?'블록 밀착 사용':'블록 밀착 미사용'}</span></div>`}${alternativesHtml(r)}<div class="container-results">${containerRows||'<div class="empty-state">적재 가능한 컨테이너 결과가 없습니다.</div>'}</div><div class="calc-note">계산 시간 ${r.elapsedMs.toFixed(0)} ms · 직육면체 축정렬 휴리스틱입니다. 결과는 계획/견적용 계산 보조이며 실제 선적 전에는 라싱·고정재 강도·바닥 점하중·반입 회전 경로·법규/선사 조건을 별도 확인하세요.</div></section>`
+  return `<section class="panel results-panel" id="results"><div class="section-head section-head--actions"><div><span class="section-number">5</span><div><h2>최적화 결과 및 정밀 검증</h2><p>포장 후 외형과 작업 여유를 기준으로 컨테이너별 3D 배치, 물리적 안전성, 지게차 상차 순서를 도출했습니다.</p></div></div><div class="button-row"><button class="button button--ghost" data-action="open-manual" data-tab="safety">${icon('info',16)} 검증 기준 안내</button><button class="button button--ghost" data-action="export-result-csv">${icon('download',16)} CSV</button><button class="button button--ghost" data-action="export-result-json">${icon('file',16)} JSON</button></div></div><div class="result-stats result-stats--six"><div class="metric">${icon('container',20)}<span>선정 컨테이너</span><strong>${r.containers.length}대</strong><small>${containerTypeSummary(r.containers.reduce((m,c)=>(m[c.spec.shortName]=(m[c.spec.shortName]||0)+1,m),{}))} · ${resultGoalLabel(r)}</small></div><div class="metric">${icon('calc',20)}<span>공간 활용률</span><strong>${pct(totalUsable?totalUsed/totalUsable:0)}</strong><small>설정 여유 제외 공간 기준</small></div><div class="metric">${icon('box',20)}<span>총 적재 중량</span><strong>${fmtInt(totalPackedWeight)} kg</strong><small>포장 자중 포함</small></div><div class="metric">${icon('package',20)}<span>포장 추가 체적</span><strong>${packagingAddedVolume().toFixed(2)} m³</strong><small>제품 실체적 대비 증가</small></div><div class="metric metric--accent">${icon('layers',20)}<span>내부 공간 활용</span><strong>${nestedCount}개</strong><small>${r.nestedSavedVolumeM3.toFixed(2)} m³ 외부 점유 절감</small></div><div class="metric ${warnings?'metric--warning':''}">${icon(warnings?'alert':'check',20)}<span>검토 경고</span><strong>${warnings}건</strong><small>무게중심·바닥하중 설정 기준</small></div></div>${unpackedDiagnosticsHtml(r.unpacked)}${zeroWeightTypes?`<div class="info-banner">${icon('info',18)}<div><strong>단위중량이 0 kg인 품목이 ${zeroWeightTypes}종 있습니다.</strong><span>컨테이너 대수·공간 배치는 계산되지만 총중량, 무게중심(CG), 바닥하중은 실제 중량을 입력하기 전까지 참고용입니다.</span></div></div>`:''}${`<div class="result-assumption"><strong>현재 배치 가정</strong><span>프리셋 ${esc(state.settings.preset)} · 바닥 간격 ${fmtInt(state.settings.itemGap)} mm · 상부 간격 ${fmtInt(state.settings.stackItemGap||0)} mm · 지지율 ${Math.round(num(state.settings.supportRatio,.75)*100)}% · ${state.settings.blockContact?'블록 밀착 사용':'블록 밀착 미사용'}</span></div>`}${alternativesHtml(r)}<div class="container-results">${containerRows||'<div class="empty-state">적재 가능한 컨테이너 결과가 없습니다.</div>'}</div><div class="calc-note">계산 시간 ${r.elapsedMs.toFixed(0)} ms · 직육면체 축정렬 휴리스틱입니다. 결과는 계획/견적용 계산 보조이며 실제 선적 전에는 라싱·고정재 강도·바닥 점하중·반입 회전 경로·법규/선사 조건을 별도 확인하세요.</div></section>`
 }
 
-function exportsHtml(){if(!state.result)return'';return `<section class="panel export-panel" id="exports"><div class="section-head"><span class="section-number">6</span><div><h2>결과 내보내기</h2><p>완료된 계산을 보고서·표·이미지·원본 데이터로 저장합니다.</p></div></div><div class="export-grid"><button class="export-card export-card--pdf" data-action="export-pdf">${icon('file',24)}<div><strong>PDF 보고서</strong><span>A4 형식 · 컨테이너별 페이지</span></div></button><button class="export-card export-card--xls" data-action="export-xlsx">${icon('sheet',24)}<div><strong>Excel (XLSX)</strong><span>요약·화물·좌표·내부 적재 시트</span></div></button><button class="export-card export-card--png" data-action="export-png">${icon('image',24)}<div><strong>이미지 (PNG)</strong><span>결과 요약 + 배치 이미지</span></div></button><button class="export-card" data-action="export-result-csv">${icon('download',24)}<div><strong>CSV 좌표</strong><span>컨테이너·화물별 X/Y/Z 데이터</span></div></button><button class="export-card" data-action="export-result-json">${icon('file',24)}<div><strong>전체 JSON</strong><span>계산 조건과 결과 원본</span></div></button></div></section>`}
+function exportsHtml(){if(!state.result)return'';return `<section class="panel export-panel" id="exports"><div class="section-head"><span class="section-number">6</span><div><h2>결과 내보내기</h2><p>완료된 계산을 보고서·표·이미지·원본 데이터로 저장합니다.</p></div></div><div class="export-grid"><button class="export-card export-card--pdf" data-action="export-pdf">${icon('file',24)}<div><strong>PDF 보고서</strong><span>A4 형식 · 컨테이너별 페이지</span></div></button><button class="export-card export-card--xls" data-action="export-xlsx">${icon('sheet',24)}<div><strong>Excel (XLSX)</strong><span>요약·검증·상차순서·화물·좌표 시트</span></div></button><button class="export-card export-card--png" data-action="export-png">${icon('image',24)}<div><strong>이미지 (PNG)</strong><span>결과 요약 + 배치 이미지</span></div></button><button class="export-card" data-action="export-result-csv">${icon('download',24)}<div><strong>CSV 좌표</strong><span>컨테이너·화물별 X/Y/Z 데이터</span></div></button><button class="export-card" data-action="export-result-json">${icon('file',24)}<div><strong>전체 JSON</strong><span>계산 조건과 결과 원본</span></div></button></div></section>`}
+
+function renderManualModal(){
+  const active = state.manualTab || 'workflow'
+  const navTabs = [
+    ['workflow', '🚀 6단계 전체 흐름'],
+    ['cargo-package', '📦 실치수 vs 포장'],
+    ['rules', '🔄 회전 & 적층 룰'],
+    ['nested', '🗃️ 탱크 내부 빈 공간'],
+    ['viewer3d', '🪐 3D 뷰어 & 시뮬레이터'],
+    ['safety', '🛡️ ISO 1496 안전 검증'],
+    ['manifest', '📋 상차 지시서 & 보고서'],
+    ['samples', '🎯 실무 검증 샘플']
+  ]
+
+  let contentHtml = ''
+  if(active === 'workflow'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>🚀 Container Fit 실무 적재 최적화 6단계 워크플로우</h3>
+        <p class="manual-lead">Container Fit은 단순 상자 채우기 알고리즘을 넘어, <b>제품 실치수부터 실제 출하 포장 외형, 회전 및 적층 룰, 내부 빈 공간 활용, ISO 1496 안전 규정 검증</b>까지 완벽하게 지원하는 실무 전용 시스템입니다.</p>
+        
+        <div class="manual-step-grid">
+          <div class="manual-step-card">
+            <span class="manual-step-num">1</span>
+            <strong>컨테이너 내측 규격 선택</strong>
+            <p>20ft Standard, 40ft Standard, 40ft High Cube 규격 중 후보를 선택하고, 도어 개구부 및 페이로드 중량을 확인합니다. 특수 규격은 '규격 추가'로 등록 가능합니다.</p>
+          </div>
+          <div class="manual-step-card">
+            <span class="manual-step-num">2</span>
+            <strong>화물 및 제품 실치수 등록</strong>
+            <p>제품/장비의 순수 실치수(L×W×H)와 단위 중량, 수량을 입력합니다. CSV 일괄 업로드나 사전 준비된 실무 예제 데이터 로드도 지원합니다.</p>
+          </div>
+          <div class="manual-step-card">
+            <span class="manual-step-num">3</span>
+            <strong>출하 포장 사양 지정</strong>
+            <p>우드 고정, 스키드, 크레이트, 수출용 팔레트, 철제 프레임 등 실제 점유 공간과 포장 자중을 가산하거나, 완성 포장 외형을 직접 입력(Override)합니다.</p>
+          </div>
+          <div class="manual-step-card">
+            <span class="manual-step-num">4</span>
+            <strong>작업 여유 공간 & 적재 조건</strong>
+            <p>문측/벽면/천장 여유, 도어 개구부 통과 마진, 품목 간 간격 및 상부 적층 시 하부 지지율(기본 60~75%)을 설정합니다.</p>
+          </div>
+          <div class="manual-step-card">
+            <span class="manual-step-num">5</span>
+            <strong>3D 비동기 최적화 계산</strong>
+            <p>Web Worker 기반 3D 블록 적재 알고리즘이 실행되어 최적 컨테이너 대수, 배치 좌표, 그리고 현장 상차 순서를 도출합니다.</p>
+          </div>
+          <div class="manual-step-card">
+            <span class="manual-step-num">6</span>
+            <strong>물리 안전성 검증 및 보고서 출력</strong>
+            <p>360° 3D Orbit 뷰어로 배치를 확인하고, ISO 1496 무게중심과 안전 점수를 검증한 뒤, 현장 상차 지시서 및 PDF/Excel로 출력합니다.</p>
+          </div>
+        </div>
+      </div>
+    `
+  } else if(active === 'cargo-package'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>📦 제품 실치수 vs 포장 후 점유 외형의 분리 관리</h3>
+        <p class="manual-lead">실제 물류 현장에서는 도면 치수 그대로 컨테이너에 들어가지 않습니다. 목재 스키드, 방수 포장, 외곽 크레이트 등으로 인해 치수와 중량이 증가합니다.</p>
+
+        <div class="manual-feature-box">
+          <strong>💡 왜 실치수와 포장 외형을 분리해야 할까요?</strong>
+          <p>엔지니어링 팀은 장비의 순수 도면 치수를 다루지만, 물류·포장팀은 외곽 크레이트와 바닥 스키드가 부착된 상태로 상차합니다. Container Fit은 제품 실치수에 포장 방식을 선택하면 출하 외형과 자중을 자동으로 합성하여 계산합니다.</p>
+        </div>
+
+        <h4>기본 제공 포장 프리셋 (8종)</h4>
+        <div class="manual-table-wrap">
+          <table class="manual-table">
+            <thead>
+              <tr><th>포장 방식</th><th>길이(L) 추가</th><th>폭(W) 추가</th><th>높이(H) 추가</th><th>포장 자중</th><th>특징 및 실무 용도</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><b>장비 직접 적재</b></td><td>+0 mm</td><td>+0 mm</td><td>+0 mm</td><td>+0 kg</td><td>외장 포장 없이 제품 본체 그대로 선적</td></tr>
+              <tr><td><b>우드 고정 · 블로킹</b></td><td>+120 mm</td><td>+120 mm</td><td>+80 mm</td><td>+25 kg</td><td>목재 받침목 및 바닥 스토퍼 고정 방식</td></tr>
+              <tr><td><b>우드 스키드</b></td><td>+100 mm</td><td>+100 mm</td><td>+120 mm</td><td>+35 kg</td><td>하부 목재 스키드 레일 부착 방식</td></tr>
+              <tr><td><b>우드 크레이트 · 박스</b></td><td>+160 mm</td><td>+160 mm</td><td>+180 mm</td><td>+65 kg</td><td>밀폐형 완전 목재 박스 포장</td></tr>
+              <tr><td><b>팔레트 적재</b></td><td>+100 mm</td><td>+100 mm</td><td>+140 mm</td><td>+25 kg</td><td>표준 수출용 목재/플라스틱 팔레트</td></tr>
+              <tr><td><b>철제 프레임</b></td><td>+120 mm</td><td>+120 mm</td><td>+100 mm</td><td>+55 kg</td><td>중량물용 스틸 베이스 프레임</td></tr>
+              <tr><td><b>방수 · 진공 포장</b></td><td>+20 mm</td><td>+20 mm</td><td>+20 mm</td><td>+3 kg</td><td>방습 은박 필름 및 진공 래핑 포장</td></tr>
+              <tr><td><b>완성 포장 직접 입력</b></td><td colspan="4"><b>실제 제작 도면 치수 (L × W × H) 최우선 직접 지정</b></td><td>포장업체 확정 도면이 있을 때 최우선 사용</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `
+  } else if(active === 'rules'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>🔄 적재 방향 (회전) 및 적층(지지) 룰 가이드</h3>
+        <p class="manual-lead">화물마다 물리적 특성이 다릅니다. 넘어뜨리면 안 되는 정밀 장비, 눕힐 수 있는 상자, 하중을 견딜 수 있는 베이스 장비를 직관적으로 설정할 수 있습니다.</p>
+
+        <h4>1. 회전 허용 모드 (Orientation Mode)</h4>
+        <div class="manual-card-grid">
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>기본 자세 고정 (Fixed)</strong><span class="badge badge--blue">회전 금지</span></div>
+            <p>입력된 L, W, H 방향 그대로만 적재합니다. 상하/좌우 회전이 불가능한 전도 민감 장비나 상부 배관 돌출 장비에 적용합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>수직 유지 · 90° 회전 (Upright)</strong><span class="badge badge--green">바닥면 90°</span></div>
+            <p>높이(H)는 항상 수직으로 유지한 채, 바닥 평면상에서 90도 회전만 허용합니다. 냉매/오일이 충진된 장비나 수직 거치 필수 장비에 권장합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>3축 회전 · 눕힘 허용 (All)</strong><span class="badge badge--orange">최대 6방향 탐색</span></div>
+            <p>L, W, H 축을 자유롭게 전환하여 옆으로 눕히거나 앞으로 세우는 6가지 모든 자세를 비교합니다. 밀폐형 소형 박스나 방향 무관 자재에 적합합니다.</p>
+          </div>
+        </div>
+
+        <h4>2. 적층 역할 모드 (Stack Role)</h4>
+        <div class="manual-card-grid">
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>적층 안 함 (None)</strong></div>
+            <p>단독으로만 바닥에 놓이며, 위로도 올라가지 않고 위에 아무것도 받치지 않습니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>다른 화물 위에 올림 (Upper)</strong></div>
+            <p>하부 화물의 상부 적재면 또는 데크 위에 2단으로 올라가는 상부 적재 전용 화물입니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>이 화물 위에 적재 허용 (Support)</strong></div>
+            <p>하부 받침 역할을 하며, 상부에 다른 화물이 적재될 수 있도록 지지면을 제공합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>위 · 아래 모두 허용 (Both)</strong></div>
+            <p>하부에서 받칠 수도 있고, 상부로 올라갈 수도 있는 범용 적층 화물입니다.</p>
+          </div>
+        </div>
+      </div>
+    `
+  } else if(active === 'nested'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>🗃️ 탱크·프레임 내부 빈 공간 (Nested Space) 활용</h3>
+        <p class="manual-lead">상부 개방형 수조 탱크, 대형 원형/사각 프레임, 빈 기계 챔버 등 내부가 비어 있는 대형 구조물의 내부 공간을 재활용하여 작은 부품을 선적할 수 있습니다.</p>
+
+        <div class="manual-feature-box">
+          <strong>🌟 내부 적재 알고리즘의 동작 순서</strong>
+          <ol style="margin:8px 0 0 18px; line-height:1.7;">
+            <li><b>1단계:</b> 화물 등록 시 '제품/장비 내부 사용가능 공간' 체크 후 내측 L × W × H 및 상부/측면 개방 형태를 입력합니다.</li>
+            <li><b>2단계:</b> 내부로 들어갈 수 있는 작은 부품에 '다른 화물 내부에 삽입 가능(canBeNested)'을 체크합니다.</li>
+            <li><b>3단계:</b> 최적화 엔진이 컨테이너 바닥에 배치하기 전에, 대형 탱크 내부로 작은 화물을 3D 적재하여 먼저 포장합니다.</li>
+            <li><b>4단계:</b> 내부 적재가 완료된 탱크는 하나의 단위로 컨테이너에 실리며, 외부 공간 점유율을 획기적으로 낮춥니다.</li>
+          </ol>
+        </div>
+
+        <div style="margin-top:14px; text-align:center;">
+          <button class="button button--primary" data-action="load-sample" data-id="nested">🚀 탱크 내부 적재 + 2단 적층 샘플 프로젝트 즉시 로드</button>
+        </div>
+      </div>
+    `
+  } else if(active === 'viewer3d'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>🪐 3D 인터랙티브 뷰어 & 단계별 시뮬레이터 조작법</h3>
+        <p class="manual-lead">무거운 외부 3D 라이브러리 없이 순수 HTML5 Canvas 2D + 투영 매트릭스로 개발되어 웹 브라우저에서 초고속으로 360° 3D 뷰를 탐색할 수 있습니다.</p>
+
+        <div class="manual-card-grid">
+          <div class="manual-sub-card">
+            <strong>🖱️ 360° 마우스 및 터치 조작</strong>
+            <ul style="margin:6px 0 0 16px; font-size:12px; line-height:1.7;">
+              <li><b>좌클릭 드래그:</b> 360° 궤도 회전 (수평 Yaw, 수직 Pitch)</li>
+              <li><b>마우스 휠 스크롤:</b> 확대 및 축소 (Zoom In/Out)</li>
+              <li><b>우클릭 / Shift+드래그:</b> 화면 상하좌우 평행 이동 (Pan)</li>
+              <li><b>화물 박스 클릭:</b> 해당 화물의 명칭, 포장 치수, 중량, 3D 좌표 플로팅 카드 표시</li>
+            </ul>
+          </div>
+          <div class="manual-sub-card">
+            <strong>🎯 4대 검증 시각화 레이어</strong>
+            <ul style="margin:6px 0 0 16px; font-size:12px; line-height:1.7;">
+              <li><b>무게중심 (C.G.):</b> 종합 무게중심 구체 및 바닥 수직 낙하선</li>
+              <li><b>ISO 1496 안전 영역:</b> 컨테이너 바닥의 규정 준수 기준 사각형</li>
+              <li><b>바닥 하중 히트맵:</b> 24×10 격자별 집중하중 밀도 컬러 맵</li>
+              <li><b>여유공간 가이드:</b> 도어 개구부 및 도어/벽면 작업 클리어런스</li>
+            </ul>
+          </div>
+        </div>
+
+        <h4>⏱️ 지게차 상차 순서 시뮬레이터 (Sequence Player)</h4>
+        <p>현장 작업자가 어떤 순서로 화물을 넣어야 하는지 알 수 있도록 <b>스텝 슬라이더</b>와 <b>[▶ 재생 / ⏸ 일시정지]</b> 버튼을 제공합니다. 안쪽 벽면(X min)부터 도어 방향으로 차례대로 화물이 채워지는 시뮬레이션을 눈으로 확인할 수 있습니다.</p>
+      </div>
+    `
+  } else if(active === 'safety'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>🛡️ 물리 & 규정 안전성 정밀 검증 센터 (Safety & Compliance)</h3>
+        <p class="manual-lead">ISO 1496-1 및 해상 컨테이너 안전 규정에 따라 출하 적합성(Pass/Warn/Fail)을 자동으로 검증하고 종합 안전 점수를 산출합니다.</p>
+
+        <h4>1. 100점 만점 종합 안전 점수 (Safety Score) 산출 공식</h4>
+        <div class="manual-table-wrap">
+          <table class="manual-table">
+            <thead>
+              <tr><th>평가 항목</th><th>배점</th><th>기준 및 계산 로직</th><th>안전 기준</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><b>페이로드 중량 여유</b></td><td>30점</td><td>(최대 허용중량 - 실적재중량) / 최대 허용중량</td><td>컨테이너 허용 페이로드 초과 시 0점 (FAIL)</td></tr>
+              <tr><td><b>종방향 C.G. 밸런스 (X축)</b></td><td>25점</td><td>길이 기준 중앙 50% 구간(25% ~ 75%) 안착 여부</td><td>도어나 안쪽 끝으로 편중 시 감점</td></tr>
+              <tr><td><b>횡방향 C.G. 밸런스 (Y축)</b></td><td>25점</td><td>폭 기준 중앙 40% 구간(30% ~ 70%) 안착 여부</td><td>좌우 쏠림 시 롤링/전복 위험 감점</td></tr>
+              <tr><td><b>바닥 하중 분산 균일도</b></td><td>20점</td><td>바닥 면적당 집중하중(Peak load) 분산 상태</td><td>국소 부위 집중 하중 방지</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="font-size:11.5px; color:#475569; margin-top:6px;"><b>판정 등급:</b> 90점 이상 🟢 출하 적합(안전) · 70~89점 🟡 조건부 적합(주의) · 70점 미만 🔴 재배치 필요(위험)</p>
+
+        <h4>2. ISO 1496 7대 핵심 안전 기준 점검표</h4>
+        <div class="manual-card-grid">
+          <div class="manual-sub-card">
+            <strong>1) 기하 충돌 0건 (Collision-free)</strong>
+            <p>화물 간 3D 공간 겹침이 0건이어야 합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <strong>2) 컨테이너 경계 준수 (Boundary)</strong>
+            <p>컨테이너 내측 길이, 폭, 높이를 이탈하지 않아야 합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <strong>3) 최대 적재중량 준수 (Payload)</strong>
+            <p>포장 자중을 포함한 총중량이 한도 이하이어야 합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <strong>4) 전후 C.G. 25~75% 안전 구역</strong>
+            <p>트럭/트레일러 축중 분배를 위해 전후 중심 내에 위치해야 합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <strong>5) 좌우 C.G. 30~70% 밸런스</strong>
+            <p>해상 선박 항행 중 횡요(Rolling) 전복을 방지합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <strong>6) 바닥 단위면적 집중하중 안전</strong>
+            <p>컨테이너 목재/강재 바닥판 파손을 방지합니다.</p>
+          </div>
+          <div class="manual-sub-card" style="grid-column: 1 / -1;">
+            <strong>7) 상부 2단 적층 지지율 (Support Ratio 60% 이상)</strong>
+            <p>상부 화물이 하부 화물 위에 안정적으로 안착할 수 있도록 접촉 면적이 충분해야 합니다.</p>
+          </div>
+        </div>
+      </div>
+    `
+  } else if(active === 'manifest'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>📋 상차 지시서(Manifest) 및 다목적 보고서 출력</h3>
+        <p class="manual-lead">계산된 결과를 물류 현장, 포장업체, 화주 및 선사에 즉시 전달할 수 있는 다양한 포맷으로 출력합니다.</p>
+
+        <div class="manual-card-grid">
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>🖨️ 현장 상차 순서 지시서 인쇄</strong><span class="badge badge--green">A4 서식</span></div>
+            <p>'상차 순서 지시서' 탭에서 [지시서 인쇄]를 누르면 불필요한 UI가 숨겨지고, 현장 책임자 및 지게차 기사 서명란이 포함된 공식 상차 작업 지시서가 인쇄됩니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>📄 PDF 종합 보고서</strong><span class="badge badge--blue">고해상도 캔버스</span></div>
+            <p>컨테이너별 종합 안전점수, 무게중심 좌표, ISO 1496 적합 판정, 3D/2D 배치 도면이 포함된 다장(Multi-page) A4 인쇄 보고서를 즉시 다운로드합니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>📊 Excel (XLSX) 내보내기</strong><span class="badge badge--orange">6개 전용 시트</span></div>
+            <p>요약, 화물사양, 3D 안착좌표, 내부적재 외에 <code>Safety_Validation</code>(안전성 검증 리포트) 및 <code>Loading_Sequence</code>(상차 순서표) 시트가 함께 포함됩니다.</p>
+          </div>
+          <div class="manual-sub-card">
+            <div class="manual-sub-card__head"><strong>💾 CSV & JSON 원본 데이터</strong><span class="badge badge--purple">시스템 연동</span></div>
+            <p>ERP, WMS 또는 다른 분석 시스템과의 연동을 위한 배치 좌표 CSV 및 전체 계산 결과 JSON 원본을 저장할 수 있습니다.</p>
+          </div>
+        </div>
+      </div>
+    `
+  } else if(active === 'samples'){
+    contentHtml = `
+      <div class="manual-section">
+        <h3>🎯 실무 검증 샘플 프로젝트 즉시 체험</h3>
+        <p class="manual-lead">실제 CAD 도면 기반 프로젝트와 중첩/적층 고난도 프로젝트를 원클릭으로 로드하여 3D 최적화 및 안전성 검증을 직접 체험해 보세요.</p>
+
+        <div class="manual-card-grid">
+          <div class="manual-sub-card manual-sample-card">
+            <div>
+              <strong>🏢 [샘플 1] CAD 실도면 3대 배치 프로젝트</strong>
+              <p>40STD 2대 + 20STD 1대에 대형 머신(4.2t), 우드 크레이트, 박스 블록을 100% 누락 없이 밀착 적재한 실제 산업용 프로젝트입니다.</p>
+            </div>
+            <button class="button button--primary button--small" data-action="load-sample" data-id="cad">이 샘플 불러와서 계산하기</button>
+          </div>
+
+          <div class="manual-sub-card manual-sample-card">
+            <div>
+              <strong>🗃️ [샘플 2] 탱크 내부 공간(Nested) + 2단 적층 프로젝트</strong>
+              <p>상부 개방 탱크 내부에 36개 소형 부품을 채워 넣고, 상판 데크 위에 14개 박스를 2단 적층하는 고급 공간 재활용 프로젝트입니다.</p>
+            </div>
+            <button class="button button--primary button--small" data-action="load-sample" data-id="nested">이 샘플 불러와서 계산하기</button>
+          </div>
+
+          <div class="manual-sub-card manual-sample-card">
+            <div>
+              <strong>📦 [샘플 3] 표준 복합 장비 기본 샘플</strong>
+              <p>고정 장비, 하부 지지 크레이트, 상부 적층 박스, 개방 탱크가 혼합된 기본 튜토리얼 샘플입니다.</p>
+            </div>
+            <button class="button button--soft button--small" data-action="load-sample" data-id="basic">이 샘플 불러오기</button>
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  return `
+    <div class="modal-backdrop">
+      <div class="modal modal--manual">
+        <header class="modal__header">
+          <div>
+            <h2>📖 Container Fit 사용방법 설명서 및 실무 적재 가이드</h2>
+            <p>제품 실치수 입력부터 포장 외형, 회전·적층 룰, 3D 시뮬레이션, ISO 1496 안전 검증까지 완벽 안내</p>
+          </div>
+          <button type="button" class="icon-button" data-action="close-modal" aria-label="닫기">${icon('close', 20)}</button>
+        </header>
+
+        <nav class="manual-nav-tabs">
+          ${navTabs.map(([id, label]) => `
+            <button class="manual-nav-tab ${active === id ? 'is-active' : ''}" data-action="manual-tab" data-id="${id}">
+              ${label}
+            </button>
+          `).join('')}
+        </nav>
+
+        <div class="modal__body manual-body">
+          ${contentHtml}
+        </div>
+
+        <footer class="modal__footer">
+          <span style="font-size:11.5px; color:#64748b;">Container Fit v1.10.0 · 정적 브라우저 최적화 엔진</span>
+          <button type="button" class="button button--primary" data-action="close-modal">확인 (닫기)</button>
+        </footer>
+      </div>
+    </div>
+  `
+}
 
 function modalHtml(){
   if(!state.modal)return''
+  if(state.modal.type==='manual') return renderManualModal()
   if(state.modal.type==='cargo'){
     const base=state.modal.item||normalizeCargoItem({id:`cargo-${Date.now()}`,name:'',length:1000,width:800,height:900,weightKg:100,quantity:1,rotation:'locked',orientationRules:{rotate90:false,layWidth:false,layLength:false},canBeStacked:false,canSupportCargo:false,stackable:false,maxStackLayers:1,sameCargoStackOnly:true,canBeNested:false,color:'#2f80ed',packaging:{type:state.modal.packageType||'bare'},innerSpace:{enabled:false,length:0,width:0,height:0,access:'top'}})
     const c=normalizeCargoItem(base),p=normalizePackaging(c.packaging),d=packedDimensions(c)
@@ -215,11 +947,45 @@ function modalHtml(){
   return `<div class="modal-backdrop"><form class="modal modal--small" data-form="container" novalidate><header class="modal__header"><div><h2>${state.modal.item?'컨테이너 규격 수정':'사용자 컨테이너 추가'}</h2><p>실제 계산에는 반드시 내측 사용 가능 치수를 입력하세요.</p></div><button type="button" class="icon-button" data-action="close-modal">${icon('close',20)}</button></header><div class="modal__body form-grid"><input type="hidden" name="id" value="${esc(c.id)}"><label class="field field--wide"><span>규격명</span><input required name="name" value="${esc(c.name)}"></label>${[['length','내측 L (mm)',c.length],['width','내측 W (mm)',c.width],['height','내측 H (mm)',c.height],['doorWidth','문 개구 폭 (mm)',c.doorWidth||''],['doorHeight','문 개구 높이 (mm)',c.doorHeight||''],['maxPayloadKg','최대 적재중량 (kg)',c.maxPayloadKg]].map(([n,l,v])=>`<label class="field"><span>${l}</span><input ${n==='maxPayloadKg'||['length','width','height'].includes(n)?'required':''} type="number" min="0" name="${n}" value="${v}"></label>`).join('')}</div><footer class="modal__footer"><button type="button" class="button button--ghost" data-action="close-modal">취소</button><button class="button button--primary" type="submit">규격 저장</button></footer></form></div>`
 }
 
+function init3DViewers(){
+  const canvases = $$('.canvas-3d')
+  for(const canvas of canvases){
+    const cIdx = Number(canvas.dataset.containerIndex)
+    const container = state.result?.containers?.find(c => c.index === cIdx)
+    if(!container) continue
+
+    let viewer = viewersMap.get(cIdx)
+    if(!viewer || viewer.canvas !== canvas){
+      viewer = new Container3DViewer(canvas, {
+        showCg: state.layers.cg,
+        showHeatmap: state.layers.heatmap,
+        showClearances: state.layers.clearances,
+        stepIndex: state.containerSteps[cIdx] ?? -1,
+        selectedUid: state.selectedPlacement?.uid,
+        onSelect: (item) => {
+          state.selectedPlacement = item
+          render()
+        }
+      })
+      viewersMap.set(cIdx, viewer)
+    }
+    viewer.setLayers(state.layers)
+    viewer.setStep(state.containerSteps[cIdx] ?? -1)
+    viewer.setSelected(state.selectedPlacement?.uid)
+    viewer.setContainer(container, state.settings)
+  }
+}
+
 function render(){
   const keepScroll=window.scrollY
   const usable=state.containers.filter(c=>c.enabled).length
-  document.getElementById('app').innerHTML=`<div class="app-shell"><aside class="sidebar ${state.mobileNav?'is-open':''}"><div class="brand"><div class="brand-mark">${icon('container',25)}</div><div><strong>Container Fit</strong><span>실무 적재 최적화</span></div><button class="sidebar-close" data-action="mobile-close">${icon('close',22)}</button></div><nav class="side-nav" aria-label="주요 메뉴"><button data-scroll="dashboard">${icon('calc')}<span>개요</span></button><button data-scroll="containers">${icon('container')}<span>컨테이너</span></button><button data-scroll="cargo">${icon('box')}<span>화물 목록</span></button><button data-scroll="packaging">${icon('package')}<span>포장 사양</span></button><button data-scroll="settings">${icon('ruler')}<span>적재 조건</span></button><button data-scroll="results">${icon('layers')}<span>배치 결과</span></button><button data-scroll="exports" ${state.result?'':'disabled'}>${icon('download')}<span>내보내기</span></button></nav><div class="sidebar-guide">${icon('info',19)}<strong>계산 기준</strong><ol><li>내측 규격·문 개구 반영</li><li>포장 외형·회전·적층 반영</li><li>빈 공간·중량·여유 검토</li></ol></div><div class="sidebar-actions"><button class="sidebar-new-project" data-action="new-project">${icon('plus',16)}새 프로젝트</button><button data-action="export-project">${icon('save',16)}프로젝트 저장</button><button data-action="open-project-file">${icon('upload',16)}불러오기</button></div></aside><div class="main-column"><header class="topbar"><button class="mobile-menu" data-action="mobile-open">${icon('menu',22)}</button><div><strong>컨테이너 포장 최적화</strong><span>포장 후 외형과 내측 빈 공간을 함께 계산하는 적재 시뮬레이터</span></div><div class="topbar-actions"><button class="button button--ghost" data-action="new-project">${icon('plus',16)} 새 프로젝트</button><button class="button button--ghost" data-action="export-project">${icon('download',16)} 프로젝트</button></div></header><main class="workspace"><section class="intro-panel" id="dashboard"><div><h1>제품 실치수부터 우드 고정·크레이트까지, 실제 출하 외형으로 계산합니다.</h1><p>제품/장비 외형과 포장 후 점유 외형을 분리하고, 탱크·프레임 내부의 실제 적재 가능 공간까지 재사용하여 컨테이너 종류·수량·배치를 계산합니다.</p></div><div class="intro-summary"><div><span>포장 단위</span><strong>${unitCount()}개</strong></div><div><span>포장 후 체적</span><strong>${totalPackedVolume().toFixed(2)} m³</strong></div><div><span>총 출하중량</span><strong>${fmtInt(totalWeight())} kg</strong></div><div><span>포장 증가 체적</span><strong>+${packagingAddedVolume().toFixed(2)} m³</strong></div></div></section><div class="steps">${[['1','컨테이너 선택','내측·문 규격'],['2','화물 등록','제품 실치수'],['3','포장 방식','우드·크레이트·팔레트'],['4','여유 공간','작업·벽·통로'],['5','최적화 계산','배치·중량·CG'],['6','결과 저장','PDF·Excel·PNG']].map(([n,t,d])=>`<div class="step"><span>${n}</span><div><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div><section class="panel" id="containers"><div class="section-head section-head--actions"><div><span class="section-number">1</span><div><h2>컨테이너 내측 규격</h2><p>후보로 사용할 규격만 선택하세요. 사용자 규격도 추가할 수 있습니다.</p></div></div><button class="button button--soft" data-action="add-container">${icon('plus',16)} 규격 추가</button></div><div class="container-cards">${containerCards()}</div></section><section class="panel" id="cargo"><div class="section-head section-head--actions"><div><span class="section-number">2</span><div><h2>화물·포장 사양</h2><p>제품 실치수, 포장 외형, 수량과 적재 조건을 한 화면에서 관리합니다. <b>CSV 저장</b>은 현재 목록과 설정을 그대로 내보냅니다.</p></div></div><div class="button-row cargo-actions"><button class="button button--ghost" data-action="export-cargo-csv">${icon('download',16)} CSV 저장</button><button class="button button--ghost" data-action="open-csv-file">${icon('upload',16)} CSV 불러오기</button><button class="button button--soft" data-action="load-example">${icon('spark',16)} 예제 불러오기</button><button class="button button--ghost" data-action="clear-cargo" ${state.cargo.length?'':'disabled'}>${icon('trash',16)} 목록 비우기</button><button class="button button--primary" data-action="add-cargo">${icon('plus',16)} 화물 추가</button></div></div><div class="table-scroll"><table class="data-table cargo-table"><colgroup><col class="c-name"><col class="c-pack"><col class="c-qty"><col class="c-rule"><col class="c-inner"><col class="c-actions"></colgroup><thead><tr><th>화물 / 제품 규격</th><th>포장 외형</th><th>수량</th><th>적재 조건</th><th>내부 활용</th><th class="align-right">관리</th></tr></thead><tbody>${cargoRows()}</tbody></table></div>${state.cargo.length?`<div class="orientation-tip">${icon('info',16)}<span><b>적층 역할:</b> ‘다른 화물 위에 올림’은 이 화물이 위층으로 올라가는 뜻이고, ‘이 화물 위에 적재 허용’은 이 화물이 받침/상판 지지 역할을 한다는 뜻입니다. 상판/데크 활용이 켜져 있으면 받침 화물의 상부 공간을 먼저 사용합니다.</span></div>`:`<div class="empty-state empty-state--actions"><strong>화물 목록이 비어 있습니다.</strong><span>직접 등록하거나 CSV를 불러오세요. 기능을 먼저 확인하려면 예제 데이터를 사용할 수 있습니다.</span><div class="button-row"><button class="button button--soft" data-action="load-example">${icon('spark',16)} 예제 데이터</button><button class="button button--primary" data-action="add-cargo">${icon('plus',16)} 첫 화물 추가</button></div></div>`}</section><section class="panel" id="packaging"><div class="section-head"><span class="section-number">3</span><div><h2>포장 사양</h2><p>장비 직접 적재뿐 아니라 우드 블로킹, 스키드, 크레이트, 팔레트, 철제 프레임 등 실제 점유 공간을 계산합니다.</p></div></div><div class="package-library">${packagingCards()}</div><div class="logic-note">${icon('spark',18)}<div><strong>실무 적용 방식</strong><span>각 포장 방식의 추가 치수·자중은 편집 가능한 시작값입니다. 실제 포장 도면이 있으면 “완성 포장 외형 직접 입력”을 사용하여 그 치수를 최우선으로 계산하세요.</span></div></div></section><section class="panel" id="settings"><div class="section-head"><span class="section-number">4</span><div><h2>적재 조건</h2><p>최적화 목표, 작업 여유, 반입 한계, 품목 간 간격과 적층 지지조건을 설정합니다.</p></div></div><div class="optimization-block"><div class="subsection-title"><strong>최적화 목표</strong><span>기본은 블록화·적층을 먼저 활용하고 대수와 잔량을 줄입니다. 특정 컨테이너 선호가 있으면 별도로 선택하세요.</span></div><div class="preset-grid optimization-grid">${optimizationCards()}</div></div><div class="subsection-title subsection-title--border"><strong>작업 여유 프리셋</strong><span>최대 밀도 / 실무 기본 / 안전 여유를 선택한 뒤 세부값을 조정할 수 있습니다.</span></div><div class="preset-grid">${presetCards()}</div><div class="settings-grid settings-grid--dense">${[['itemGap','바닥 화물 간 최소 간격','컨테이너 바닥에 놓이는 포장 단위 간 간격','mm',0,300],['stackItemGap','상부 적층 화물 간 간격','상부 블록/2단 화물끼리의 수평 간격','mm',0,300],['verticalGap','수직 적층 간격','받침재/완충재로 생기는 높이 간격','mm',0,300],['doorClearance','문측 작업 여유','문에서 컨테이너 안쪽으로 비워둘 길이','mm',0,1000],['rearClearance','후면 여유','컨테이너 안쪽 끝벽 여유','mm',0,500],['sideClearance','좌우 벽면 여유','양 측벽에서 각각 제외','mm',0,500],['ceilingClearance','천장 여유','최상단 적재 제한','mm',0,500],['floorClearance','바닥 받침 높이','전체 화물 하부에 공통 확보할 높이','mm',0,300],['aisleWidth','측면 통로 폭','작업/점검 통로를 한쪽에 예약','mm',0,1000],['doorPassClearance','문 개구 통과 여유','문 폭·높이에서 추가로 제외','mm',0,200],['maxLoadHeight','최대 적재 높이','0이면 컨테이너 내측 높이 사용','mm',0,4000],['maxFloorLoadKgM2','평균 바닥하중 경고값','0이면 경고 검사 안 함','kg/m²',0,20000]].map(([k,t,d,u,min,max])=>`<label class="setting-control"><div><strong>${t}</strong><span>${d}</span></div><div class="number-unit"><input data-setting="${k}" type="number" min="${min}" max="${max}" value="${num(state.settings[k])}"><span>${u}</span></div></label>`).join('')}<label class="setting-control"><div><strong>상부 적재 지지율</strong><span>아래 화물이 지지해야 하는 바닥 면적 비율</span></div><div class="number-unit"><input data-setting="supportRatioPct" type="number" min="50" max="100" value="${Math.round(num(state.settings.supportRatio,.75)*100)}"><span>%</span></div></label><label class="setting-control"><div><strong>내부 화물 간격</strong><span>탱크·프레임 내부에서 작은 화물 사이 간격</span></div><div class="number-unit"><input data-setting="innerItemGap" type="number" min="0" max="100" value="${num(state.settings.innerItemGap)}"><span>mm</span></div></label><label class="setting-toggle"><div><strong>탱크·프레임 내부 적재</strong><span>내측 L×W×H 안에 ‘내부 삽입 가능’ 화물을 먼저 3D 적재</span></div><label class="switch"><input data-setting="useInnerSpaces" type="checkbox" ${state.settings.useInnerSpaces?'checked':''}><span></span></label></label><label class="setting-toggle"><div><strong>상판/데크 활용</strong><span>받침 화물 위에 판을 깐 것으로 보고 남는 상부 공간을 추가 적재면으로 사용</span></div><label class="switch"><input data-setting="useDeckBoards" type="checkbox" ${state.settings.useDeckBoards?'checked':''}><span></span></label></label><label class="setting-control"><div><strong>데크 연결 허용 간격</strong><span>같은 높이의 받침 화물 사이를 상판으로 연결할 수 있는 최대 간격</span></div><div class="number-unit"><input data-setting="deckBridgeGap" type="number" min="0" max="1000" value="${num(state.settings.deckBridgeGap,100)}"><span>mm</span></div></label><label class="setting-control"><div><strong>상판/받침판 두께</strong><span>판을 설치할 경우 상부 적재 높이에서 차감</span></div><div class="number-unit"><input data-setting="deckThickness" type="number" min="0" max="300" value="${num(state.settings.deckThickness)}"><span>mm</span></div></label><label class="setting-toggle"><div><strong>블록 맞댐 배치</strong><span>적층 가능 품목끼리는 설정 간격 대신 맞대어 하나의 블록처럼 배치</span></div><label class="switch"><input data-setting="blockContact" type="checkbox" ${state.settings.blockContact?'checked':''}><span></span></label></label></div><div class="logic-note">${icon('spark',18)}<div><strong>내부 적재 + 상판 적재 로직</strong><span>① ‘내부 삽입 가능’ 화물은 탱크·프레임의 내측 L×W×H에 3D로 먼저 쌓습니다. ② ‘이 화물 위에 적재 허용’ 화물은 상판/데크의 받침으로 사용하고, 같은 높이의 받침은 허용 간격 안에서 하나의 연속 데크로 합칩니다. ③ 내부와 데크를 채운 뒤 남는 화물만 바닥 빈 공간에 배치합니다.</span></div></div></section>${inputDiagnosticsHtml()}<section class="calculate-bar"><div><strong>현재 계산 대상</strong><span>${unitCount()}개 포장 단위 · 제품 ${totalRawVolume().toFixed(2)} m³ → 포장 ${totalPackedVolume().toFixed(2)} m³ · ${usable}종 컨테이너 후보</span></div><div class="calc-actions">${state.calculating?`<button class="button button--ghost" data-action="cancel-calc">계산 취소</button>`:''}<button class="button button--calculate" data-action="calculate" ${state.calculating?'disabled':''}>${icon('calc',20)} ${state.calculating?'최적화 계산 중…':state.settings.optimizationGoal==='auto'?'적재 최적화 계산':`${optimizationLabel(state.settings.optimizationGoal)} 계산`}</button></div></section>${state.calculating?`<div class="calc-progress"><span class="calc-spinner"></span><div><strong>배치 후보를 계산하고 있습니다.</strong><span>${esc(state.calcMessage||'회전·적층·컨테이너 조합을 탐색 중입니다. 화면은 계속 사용할 수 있습니다.')}</span></div></div>`:''}${resultsHtml()}${exportsHtml()}<section class="method-panel">${icon('info',20)}<div><strong>계산 모델 범위</strong><p>제품/포장 외형, 포장 자중, 내측 규격, 문 개구부, 여유 공간, 회전, 적층, 내부 빈 공간, 최대 적재중량을 반영합니다. 무게중심과 평균 바닥하중은 검토용 지표로 제공합니다. 실제 선적 시에는 고정재 강도, 라싱 포인트, 집중하중, 크레인/포크 작업성, 선사·법규 조건을 별도 확인해야 합니다.</p></div></section></main><footer class="footer"><span>Container Fit · 모든 프로젝트 데이터는 이 브라우저에 저장됩니다.</span><span>GitHub Pages 정적 환경에서 서버 없이 동작합니다.</span></footer></div>${modalHtml()}</div><input id="project-file" hidden type="file" accept="application/json,.json"><input id="csv-file" hidden type="file" accept=".csv,text/csv">`
-  requestAnimationFrame(()=>{window.scrollTo(0,keepScroll);initNavigation();bindModalPackagingPreview()})
+  document.getElementById('app').innerHTML=`<div class="app-shell"><aside class="sidebar ${state.mobileNav?'is-open':''}"><div class="brand"><div class="brand-mark">${icon('container',25)}</div><div><strong>Container Fit</strong><span>실무 적재 최적화</span></div><button class="sidebar-close" data-action="mobile-close">${icon('close',22)}</button></div><nav class="side-nav" aria-label="주요 메뉴"><button data-scroll="dashboard">${icon('calc')}<span>개요</span></button><button data-scroll="containers">${icon('container')}<span>컨테이너</span></button><button data-scroll="cargo">${icon('box')}<span>화물 목록</span></button><button data-scroll="packaging">${icon('package')}<span>포장 사양</span></button><button data-scroll="settings">${icon('ruler')}<span>적재 조건</span></button><button data-scroll="results">${icon('layers')}<span>배치 결과</span></button><button data-scroll="exports" ${state.result?'':'disabled'}>${icon('download')}<span>내보내기</span></button><button class="side-nav-manual" data-action="open-manual">${icon('info')}<span>사용방법 설명서</span></button></nav><div class="sidebar-guide">${icon('info',19)}<strong>계산 기준</strong><ol><li>내측 규격·문 개구 반영</li><li>포장 외형·회전·적층 반영</li><li>빈 공간·중량·여유 검토</li></ol><button class="button button--small button--ghost" data-action="open-manual" style="margin-top:8px; width:100%; font-size:11px;">📖 전체 매뉴얼 보기</button></div><div class="sidebar-actions"><button class="sidebar-new-project" data-action="new-project">${icon('plus',16)}새 프로젝트</button><button data-action="export-project">${icon('save',16)}프로젝트 저장</button><button data-action="open-project-file">${icon('upload',16)}불러오기</button></div></aside><div class="main-column"><header class="topbar"><button class="mobile-menu" data-action="mobile-open">${icon('menu',22)}</button><div><strong>컨테이너 포장 최적화</strong><span>포장 후 외형과 내측 빈 공간을 함께 계산하는 적재 시뮬레이터</span></div><div class="topbar-actions"><button class="button button--soft" data-action="open-manual">${icon('info',16)} 📖 사용방법 설명서</button><button class="button button--ghost" data-action="new-project">${icon('plus',16)} 새 프로젝트</button><button class="button button--ghost" data-action="export-project">${icon('download',16)} 프로젝트</button></div></header><main class="workspace"><section class="intro-panel" id="dashboard"><div><h1>제품 실치수부터 우드 고정·크레이트까지, 실제 출하 외형으로 계산합니다.</h1><p>제품/장비 외형과 포장 후 점유 외형을 분리하고, 탱크·프레임 내부의 실제 적재 가능 공간까지 재사용하여 컨테이너 종류·수량·배치를 계산합니다.</p></div><div class="intro-summary"><div><span>포장 단위</span><strong>${unitCount()}개</strong></div><div><span>포장 후 체적</span><strong>${totalPackedVolume().toFixed(2)} m³</strong></div><div><span>총 출하중량</span><strong>${fmtInt(totalWeight())} kg</strong></div><div><span>포장 증가 체적</span><strong>+${packagingAddedVolume().toFixed(2)} m³</strong></div></div><div class="intro-help-strip"><span>💡 처음 사용하시나요? 실무 적재 및 물리 검증 가이드를 확인하세요.</span><div class="button-row" style="margin:0;"><button class="button button--small button--ghost" data-action="open-manual">${icon('info',14)} 사용방법 설명서</button><button class="button button--small button--ghost" data-action="load-sample" data-id="cad">${icon('spark',14)} CAD 3대 실도면 샘플</button><button class="button button--small button--ghost" data-action="load-sample" data-id="nested">${icon('spark',14)} 탱크 내부적재 샘플</button></div></div></section><div class="steps">${[['1','컨테이너 선택','내측·문 규격'],['2','화물 등록','제품 실치수'],['3','포장 방식','우드·크레이트·팔레트'],['4','여유 공간','작업·벽·통로'],['5','최적화 계산','배치·중량·CG'],['6','결과 저장','PDF·Excel·PNG']].map(([n,t,d])=>`<div class="step"><span>${n}</span><div><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div><section class="panel" id="containers"><div class="section-head section-head--actions"><div><span class="section-number">1</span><div><h2>컨테이너 내측 규격</h2><p>후보로 사용할 규격만 선택하세요. 사용자 규격도 추가할 수 있습니다.</p></div></div><button class="button button--soft" data-action="add-container">${icon('plus',16)} 규격 추가</button></div><div class="container-cards">${containerCards()}</div></section><section class="panel" id="cargo"><div class="section-head section-head--actions"><div><span class="section-number">2</span><div><h2>화물·포장 사양</h2><p>제품 실치수, 포장 외형, 수량과 적재 조건을 한 화면에서 관리합니다. <b>CSV 저장</b>은 현재 목록과 설정을 그대로 내보냅니다.</p></div></div><div class="button-row cargo-actions"><button class="button button--ghost" data-action="export-cargo-csv">${icon('download',16)} CSV 저장</button><button class="button button--ghost" data-action="open-csv-file">${icon('upload',16)} CSV 불러오기</button><button class="button button--soft" data-action="load-sample" data-id="basic">${icon('spark',16)} 예제 불러오기</button><button class="button button--ghost" data-action="clear-cargo" ${state.cargo.length?'':'disabled'}>${icon('trash',16)} 목록 비우기</button><button class="button button--primary" data-action="add-cargo">${icon('plus',16)} 화물 추가</button></div></div><div class="table-scroll"><table class="data-table cargo-table"><colgroup><col class="c-name"><col class="c-pack"><col class="c-qty"><col class="c-rule"><col class="c-inner"><col class="c-actions"></colgroup><thead><tr><th>화물 / 제품 규격</th><th>포장 외형</th><th>수량</th><th>적재 조건</th><th>내부 활용</th><th class="align-right">관리</th></tr></thead><tbody>${cargoRows()}</tbody></table></div>${state.cargo.length?`<div class="orientation-tip">${icon('info',16)}<span><b>적층 역할:</b> ‘다른 화물 위에 올림’은 이 화물이 위층으로 올라가는 뜻이고, ‘이 화물 위에 적재 허용’은 이 화물이 받침/상판 지지 역할을 한다는 뜻입니다. 상판/데크 활용이 켜져 있으면 받침 화물의 상부 공간을 먼저 사용합니다.</span></div>`:`<div class="empty-state empty-state--actions"><strong>화물 목록이 비어 있습니다.</strong><span>직접 등록하거나 CSV를 불러오세요. 기능을 먼저 확인하려면 예제 데이터를 사용할 수 있습니다.</span><div class="button-row"><button class="button button--soft" data-action="load-sample" data-id="basic">${icon('spark',16)} 기본 예제</button><button class="button button--soft" data-action="load-sample" data-id="cad">${icon('spark',16)} CAD 실도면 샘플</button><button class="button button--primary" data-action="add-cargo">${icon('plus',16)} 첫 화물 추가</button></div></div>`}</section><section class="panel" id="packaging"><div class="section-head"><span class="section-number">3</span><div><h2>포장 사양</h2><p>장비 직접 적재뿐 아니라 우드 블로킹, 스키드, 크레이트, 팔레트, 철제 프레임 등 실제 점유 공간을 계산합니다.</p></div></div><div class="package-library">${packagingCards()}</div><div class="logic-note">${icon('spark',18)}<div><strong>실무 적용 방식</strong><span>각 포장 방식의 추가 치수·자중은 편집 가능한 시작값입니다. 실제 포장 도면이 있으면 “완성 포장 외형 직접 입력”을 사용하여 그 치수를 최우선으로 계산하세요.</span></div></div></section><section class="panel" id="settings"><div class="section-head"><span class="section-number">4</span><div><h2>적재 조건</h2><p>최적화 목표, 작업 여유, 반입 한계, 품목 간 간격과 적층 지지조건을 설정합니다.</p></div></div><div class="optimization-block"><div class="subsection-title"><strong>최적화 목표</strong><span>기본은 블록화·적층을 먼저 활용하고 대수와 잔량을 줄입니다. 특정 컨테이너 선호가 있으면 별도로 선택하세요.</span></div><div class="preset-grid optimization-grid">${optimizationCards()}</div></div><div class="subsection-title subsection-title--border"><strong>작업 여유 프리셋</strong><span>최대 밀도 / 실무 기본 / 안전 여유를 선택한 뒤 세부값을 조정할 수 있습니다.</span></div><div class="preset-grid">${presetCards()}</div><div class="settings-grid settings-grid--dense">${[['itemGap','바닥 화물 간 최소 간격','컨테이너 바닥에 놓이는 포장 단위 간 간격','mm',0,300],['stackItemGap','상부 적층 화물 간 간격','상부 블록/2단 화물끼리의 수평 간격','mm',0,300],['verticalGap','수직 적층 간격','받침재/완충재로 생기는 높이 간격','mm',0,300],['doorClearance','문측 작업 여유','문에서 컨테이너 안쪽으로 비워둘 길이','mm',0,1000],['rearClearance','후면 여유','컨테이너 안쪽 끝벽 여유','mm',0,500],['sideClearance','좌우 벽면 여유','양 측벽에서 각각 제외','mm',0,500],['ceilingClearance','천장 여유','최상단 적재 제한','mm',0,500],['floorClearance','바닥 받침 높이','전체 화물 하부에 공통 확보할 높이','mm',0,300],['aisleWidth','측면 통로 폭','작업/점검 통로를 한쪽에 예약','mm',0,1000],['doorPassClearance','문 개구 통과 여유','문 폭·높이에서 추가로 제외','mm',0,200],['maxLoadHeight','최대 적재 높이','0이면 컨테이너 내측 높이 사용','mm',0,4000],['maxFloorLoadKgM2','평균 바닥하중 경고값','0이면 경고 검사 안 함','kg/m²',0,20000]].map(([k,t,d,u,min,max])=>`<label class="setting-control"><div><strong>${t}</strong><span>${d}</span></div><div class="number-unit"><input data-setting="${k}" type="number" min="${min}" max="${max}" value="${num(state.settings[k])}"><span>${u}</span></div></label>`).join('')}<label class="setting-control"><div><strong>상부 적재 지지율</strong><span>아래 화물이 지지해야 하는 바닥 면적 비율</span></div><div class="number-unit"><input data-setting="supportRatioPct" type="number" min="50" max="100" value="${Math.round(num(state.settings.supportRatio,.75)*100)}"><span>%</span></div></label><label class="setting-control"><div><strong>내부 화물 간격</strong><span>탱크·프레임 내부에서 작은 화물 사이 간격</span></div><div class="number-unit"><input data-setting="innerItemGap" type="number" min="0" max="100" value="${num(state.settings.innerItemGap)}"><span>mm</span></div></label><label class="setting-toggle"><div><strong>탱크·프레임 내부 적재</strong><span>내측 L×W×H 안에 ‘내부 삽입 가능’ 화물을 먼저 3D 적재</span></div><label class="switch"><input data-setting="useInnerSpaces" type="checkbox" ${state.settings.useInnerSpaces?'checked':''}><span></span></label></label><label class="setting-toggle"><div><strong>상판/데크 활용</strong><span>받침 화물 위에 판을 깐 것으로 보고 남는 상부 공간을 추가 적재면으로 사용</span></div><label class="switch"><input data-setting="useDeckBoards" type="checkbox" ${state.settings.useDeckBoards?'checked':''}><span></span></label></label><label class="setting-control"><div><strong>데크 연결 허용 간격</strong><span>같은 높이의 받침 화물 사이를 상판으로 연결할 수 있는 최대 간격</span></div><div class="number-unit"><input data-setting="deckBridgeGap" type="number" min="0" max="1000" value="${num(state.settings.deckBridgeGap,100)}"><span>mm</span></div></label><label class="setting-control"><div><strong>상판/받침판 두께</strong><span>판을 설치할 경우 상부 적재 높이에서 차감</span></div><div class="number-unit"><input data-setting="deckThickness" type="number" min="0" max="300" value="${num(state.settings.deckThickness)}"><span>mm</span></div></label><label class="setting-toggle"><div><strong>블록 맞댐 배치</strong><span>적층 가능 품목끼리는 설정 간격 대신 맞대어 하나의 블록처럼 배치</span></div><label class="switch"><input data-setting="blockContact" type="checkbox" ${state.settings.blockContact?'checked':''}><span></span></label></label></div><div class="logic-note">${icon('spark',18)}<div><strong>내부 적재 + 상판 적재 로직</strong><span>① ‘내부 삽입 가능’ 화물은 탱크·프레임의 내측 L×W×H에 3D로 먼저 쌓습니다. ② ‘이 화물 위에 적재 허용’ 화물은 상판/데크의 받침으로 사용하고, 같은 높이의 받침은 허용 간격 안에서 하나의 연속 데크로 합칩니다. ③ 내부와 데크를 채운 뒤 남는 화물만 바닥 빈 공간에 배치합니다.</span></div></div></section>${inputDiagnosticsHtml()}<section class="calculate-bar"><div><strong>현재 계산 대상</strong><span>${unitCount()}개 포장 단위 · 제품 ${totalRawVolume().toFixed(2)} m³ → 포장 ${totalPackedVolume().toFixed(2)} m³ · ${usable}종 컨테이너 후보</span></div><div class="calc-actions">${state.calculating?`<button class="button button--ghost" data-action="cancel-calc">계산 취소</button>`:''}<button class="button button--calculate" data-action="calculate" ${state.calculating?'disabled':''}>${icon('calc',20)} ${state.calculating?'최적화 계산 중…':state.settings.optimizationGoal==='auto'?'적재 최적화 계산':`${optimizationLabel(state.settings.optimizationGoal)} 계산`}</button></div></section>${state.calculating?`<div class="calc-progress"><span class="calc-spinner"></span><div><strong>배치 후보를 계산하고 있습니다.</strong><span>${esc(state.calcMessage||'회전·적층·컨테이너 조합을 탐색 중입니다. 화면은 계속 사용할 수 있습니다.')}</span></div></div>`:''}${resultsHtml()}${exportsHtml()}<section class="method-panel">${icon('info',20)}<div><strong>계산 모델 범위</strong><p>제품/포장 외형, 포장 자중, 내측 규격, 문 개구부, 여유 공간, 회전, 적층, 내부 빈 공간, 최대 적재중량을 반영합니다. 무게중심과 평균 바닥하중은 검토용 지표로 제공합니다. 실제 선적 시에는 고정재 강도, 라싱 포인트, 집중하중, 크레인/포크 작업성, 선사·법규 조건을 별도 확인해야 합니다.</p></div></section></main><footer class="footer"><span>Container Fit · 모든 프로젝트 데이터는 이 브라우저에 저장됩니다.</span><span>GitHub Pages 정적 환경에서 서버 없이 동작합니다.</span></footer></div>${modalHtml()}</div><input id="project-file" hidden type="file" accept="application/json,.json"><input id="csv-file" hidden type="file" accept=".csv,text/csv">`
+  requestAnimationFrame(()=>{
+    window.scrollTo(0,keepScroll);
+    initNavigation();
+    bindModalPackagingPreview();
+    init3DViewers();
+  })
 }
 
 function setActiveNav(id){$$('.side-nav button').forEach(b=>b.classList.toggle('is-active',b.dataset.scroll===id))}
@@ -278,6 +1044,57 @@ async function importCsv(file){try{if(state.calculating)invalidateActiveCalculat
   state.cargo=parsed;state.result=null;persist();render();toast(`${parsed.length}개 화물 유형을 불러왔습니다. 적재 방향·적층 역할은 CSV에 지정된 범위만 계산에 사용됩니다.`,'success')
 }catch{toast('CSV 형식을 확인하세요. 필수 헤더: name,length,width,height,weightKg,quantity','error')}}
 
+async function loadSampleProject(key){
+  if(state.calculating) invalidateActiveCalculation()
+  try{
+    if(key==='cad'){
+      const res = await fetch('./examples/user-cad-block-v7.json')
+      if(!res.ok) throw new Error('파일을 찾을 수 없습니다.')
+      const p = await res.json()
+      state.containers = p.containers
+      state.cargo = migrateKnownExampleRoles(p.cargo.map(x=>normalizeCargoItem(x,{resetLegacyOrientation:num(p.version)<4})),p.version)
+      state.settings = normalizeSettings(p.settings)
+      state.result = null
+      state.modal = null
+      persist()
+      render()
+      toast('CAD 실도면 3대 배치 샘플 프로젝트를 불러왔습니다. 최적화 계산을 시작합니다.', 'success')
+      setTimeout(run, 150)
+      return
+    }
+    if(key==='nested'){
+      const res = await fetch('./examples/nested-deck-project.json')
+      if(!res.ok) throw new Error('파일을 찾을 수 없습니다.')
+      const p = await res.json()
+      state.containers = p.containers
+      state.cargo = migrateKnownExampleRoles(p.cargo.map(x=>normalizeCargoItem(x,{resetLegacyOrientation:num(p.version)<4})),p.version)
+      state.settings = normalizeSettings(p.settings)
+      state.result = null
+      state.modal = null
+      persist()
+      render()
+      toast('탱크 내부 적재 + 2단 적층 샘플 프로젝트를 불러왔습니다. 최적화 계산을 시작합니다.', 'success')
+      setTimeout(run, 150)
+      return
+    }
+    state.cargo = clone(sampleCargo).map(normalizeCargoItem)
+    state.result = null
+    state.modal = null
+    persist()
+    render()
+    toast('표준 복합 장비 예제 데이터를 불러왔습니다. 최적화 계산을 시작합니다.', 'success')
+    setTimeout(run, 150)
+  }catch(err){
+    state.cargo = clone(sampleCargo).map(normalizeCargoItem)
+    state.result = null
+    state.modal = null
+    persist()
+    render()
+    toast('기본 예제 데이터를 불러왔습니다.', 'info')
+    setTimeout(run, 150)
+  }
+}
+
 
 let calcWorker=null,calcToken=0,calcTimer=null
 function stopCalculation(message=''){
@@ -315,24 +1132,42 @@ function colName(n){let s='';while(n){n--;s=String.fromCharCode(65+n%26)+s;n=Mat
 function sheetXml(rows){return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="18"/><sheetData>${rows.map((row,ri)=>`<row r="${ri+1}">${row.map((v,ci)=>{const ref=`${colName(ci+1)}${ri+1}`;if(typeof v==='number'&&Number.isFinite(v))return `<c r="${ref}"><v>${v}</v></c>`;return `<c r="${ref}" t="inlineStr"><is><t>${xmlEsc(v??'')}</t></is></c>`}).join('')}</row>`).join('')}</sheetData></worksheet>`}
 function exportXlsx(){
   if(!state.result)return
-  const r=state.result,summary=[['Container Fit 결과 보고서'],['생성일',new Date().toLocaleString('ko-KR')],['최적화 목표',optimizationLabel(state.settings.optimizationGoal||'auto')],['실제 선택 전략',optimizationLabel(r.selectedStrategy||r.goal||state.settings.optimizationGoal||'auto')],['컨테이너 수',r.containers.length],['총 포장 단위',unitCount()],['제품 실체적(m3)',Number(totalRawVolume().toFixed(3))],['포장 후 체적(m3)',Number(totalPackedVolume().toFixed(3))],['총 출하중량(kg)',Number(totalWeight().toFixed(1))],['포장 자중(kg)',Number(r.packagingWeightKg.toFixed(1))],['내부 공간 절감(m3)',Number(r.nestedSavedVolumeM3.toFixed(3))],[],['컨테이너','규격','사용용적(m3)','활용률','중량(kg)','중량활용률','CG X(mm)','CG Y(mm)','CG Z(mm)','평균바닥하중(kg/m2)','경고']]
-  r.containers.forEach(c=>summary.push([c.index,c.spec.name,Number(c.usedVolumeM3.toFixed(3)),Number((c.volumeUtilization*100).toFixed(1)),Number(c.usedWeightKg.toFixed(1)),Number((c.weightUtilization*100).toFixed(1)),Number(c.centerOfGravity.x.toFixed(0)),Number(c.centerOfGravity.y.toFixed(0)),Number(c.centerOfGravity.z.toFixed(0)),Number(c.avgFloorLoadKgM2.toFixed(0)),c.warnings.join(' / ')]))
+  const r=state.result,summary=[['Container Fit 결과 보고서'],['생성일',new Date().toLocaleString('ko-KR')],['최적화 목표',optimizationLabel(state.settings.optimizationGoal||'auto')],['실제 선택 전략',optimizationLabel(r.selectedStrategy||r.goal||state.settings.optimizationGoal||'auto')],['컨테이너 수',r.containers.length],['총 포장 단위',unitCount()],['제품 실체적(m3)',Number(totalRawVolume().toFixed(3))],['포장 후 체적(m3)',Number(totalPackedVolume().toFixed(3))],['총 출하중량(kg)',Number(totalWeight().toFixed(1))],['포장 자중(kg)',Number(r.packagingWeightKg.toFixed(1))],['내부 공간 절감(m3)',Number(r.nestedSavedVolumeM3.toFixed(3))],[],['컨테이너','규격','사용용적(m3)','활용률','중량(kg)','중량활용률','안전점수','CG X(mm)','CG Y(mm)','CG Z(mm)','평균바닥하중(kg/m2)','경고']]
+  r.containers.forEach(c=>summary.push([c.index,c.spec.name,Number(c.usedVolumeM3.toFixed(3)),Number((c.volumeUtilization*100).toFixed(1)),Number(c.usedWeightKg.toFixed(1)),Number((c.weightUtilization*100).toFixed(1)),c.safetyScore??100,Number(c.centerOfGravity.x.toFixed(0)),Number(c.centerOfGravity.y.toFixed(0)),Number(c.centerOfGravity.z.toFixed(0)),Number(c.avgFloorLoadKgM2.toFixed(0)),c.warnings.join(' / ')]))
   const cargo=[['화물명','제품 L','제품 W','제품 H','제품중량 kg','수량','포장방식','포장 L','포장 W','포장 H','출하중량 kg','허용 방향','다른 화물 위 적재','상부 지지 허용','최대 적층 단수','동일품목만','내부 L','내부 W','내부 H','내부접근']];state.cargo.forEach(c=>{const d=packedDimensions(c);cargo.push([c.name,c.length,c.width,c.height,c.weightKg,c.quantity,c.packaging.label,d.length,d.width,d.height,packedWeightKg(c),orientationSummary(c),c.canBeStacked?'Y':'N',c.canSupportCargo?'Y':'N',c.maxStackLayers,c.sameCargoStackOnly?'Y':'N',c.innerSpace.enabled?c.innerSpace.length:'',c.innerSpace.enabled?c.innerSpace.width:'',c.innerSpace.enabled?c.innerSpace.height:'',c.innerSpace.enabled?accessLabel(c.innerSpace.access):''])})
   const placement=placementRows(),nested=[['containerNo','host','hostUnitId','innerL','innerW','innerH','cargo','unitId','x','y','z','L','W','H','weightKg']];r.containers.forEach(c=>c.nestedAssignments.forEach(a=>a.placements.forEach(p=>nested.push([c.index,a.hostCargoName,a.hostUid,a.innerLength,a.innerWidth,a.innerHeight,p.cargoName,p.uid,p.x,p.y,p.z,p.length,p.width,p.height,p.weightKg]))))
-  const sheets=[['Summary',summary],['Cargo',cargo],['Placement',placement],['Nested',nested],['Unpacked',[['cargo','unitId','reason'],...r.unpacked.map(u=>[u.cargoName,u.uid,u.unpackedReason||''])]]]
+  
+  // 1. 안전검증 시트
+  const safetySheet=[['컨테이너','규격','종합안전점수','판정','검증항목','상태','측정값','상세내용']]
+  r.containers.forEach(c=>{
+    const scoreLabel = (c.safetyScore||95)>=90?'출하적합(안전)':(c.safetyScore||95)>=70?'조건부적합(주의)':'재배치필요(위험)'
+    ;(c.checklist||[]).forEach(chk=>{
+      safetySheet.push([c.index,c.spec.name,c.safetyScore||95,scoreLabel,chk.name,chk.status.toUpperCase(),chk.value,chk.detail])
+    })
+  })
+
+  // 2. 상차 순서 시트
+  const sequenceSheet=[['컨테이너','상차순번','화물명','식별ID','포장사양','L(mm)','W(mm)','H(mm)','단위중량(kg)','상차 X(mm)','상차 Y(mm)','상차 Z(mm)','적재층수']]
+  r.containers.forEach(c=>{
+    ;(c.loadingSequence||[]).forEach(s=>{
+      sequenceSheet.push([c.index,s.step,s.cargoName,s.uid,s.packagingLabel,s.length,s.width,s.height,s.weightKg,Math.round(s.x),Math.round(s.y),Math.round(s.z),s.stackLayer>1?'2단 상부':'1단 바닥'])
+    })
+  })
+
+  const sheets=[['Summary',summary],['Safety_Validation',safetySheet],['Loading_Sequence',sequenceSheet],['Cargo',cargo],['Placement',placement],['Nested',nested],['Unpacked',[['cargo','unitId','reason','fixHint'],...r.unpacked.map(u=>[u.cargoName,u.uid,u.reasonText||u.unpackedReason||'',u.fixHint||''])]]]
   const content=`<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_,i)=>`<Override PartName="/xl/worksheets/sheet${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`
   const rels=`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`
   const wb=`<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map(([n],i)=>`<sheet name="${xmlEsc(n)}" sheetId="${i+1}" r:id="rId${i+1}"/>`).join('')}</sheets></workbook>`
   const wbr=`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_,i)=>`<Relationship Id="rId${i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i+1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
   const styles=`<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Arial"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>`
   const files=[{name:'[Content_Types].xml',data:content},{name:'_rels/.rels',data:rels},{name:'xl/workbook.xml',data:wb},{name:'xl/_rels/workbook.xml.rels',data:wbr},{name:'xl/styles.xml',data:styles},...sheets.map(([,rows],i)=>({name:`xl/worksheets/sheet${i+1}.xml`,data:sheetXml(rows)}))]
-  downloadBlob('container-fit-result.xlsx',zipStore(files));toast('Excel XLSX 결과를 저장했습니다.','success')
+  downloadBlob('container-fit-result.xlsx',zipStore(files));toast('Excel XLSX(안전검증/상차지시서 포함) 결과를 저장했습니다.','success')
 }
 
 // ---------- Report canvas / PNG / PDF ----------
 function roundedRect(ctx,x,y,w,h,r=12){ctx.beginPath();ctx.roundRect(x,y,w,h,r)}
 function text(ctx,s,x,y,size=24,weight=400,color='#17324a',align='left'){ctx.save();ctx.font=`${weight} ${size}px "Malgun Gothic","Apple SD Gothic Neo",Arial,sans-serif`;ctx.fillStyle=color;ctx.textAlign=align;ctx.textBaseline='alphabetic';ctx.fillText(String(s),x,y);ctx.restore()}
-function drawReportPage(container,index,total){const W=1240,H=1754,canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);ctx.fillStyle='#0d3153';ctx.fillRect(0,0,W,154);text(ctx,'Container Fit',64,72,38,700,'#fff');text(ctx,'컨테이너 적재 최적화 결과 보고서',64,116,24,500,'#cfe5f7');text(ctx,`${index+1} / ${total}`,1170,84,20,600,'#cfe5f7','right');const r=state.result;let y=205;text(ctx,`Container ${String(container.index).padStart(2,'0')} · ${container.spec.name}`,64,y,30,700);y+=45;text(ctx,`내측 ${fmtInt(container.spec.length)} × ${fmtInt(container.spec.width)} × ${fmtInt(container.spec.height)} mm  |  문 ${fmtInt(container.spec.doorWidth||0)} × ${fmtInt(container.spec.doorHeight||0)} mm`,64,y,18,400,'#58748c');y+=50;const metrics=[['사용 용적',`${container.usedVolumeM3.toFixed(2)} m³`],['공간 활용률',pct(container.volumeUtilization)],['적재 중량',`${fmtInt(container.usedWeightKg)} kg`],['중량 활용률',pct(container.weightUtilization)],['CG X/Y/Z',`${fmtInt(container.centerOfGravity.x)} / ${fmtInt(container.centerOfGravity.y)} / ${fmtInt(container.centerOfGravity.z)} mm`],['평균 바닥하중',`${fmtInt(container.avgFloorLoadKgM2)} kg/m²`]];metrics.forEach((m,i)=>{const col=i%3,row=Math.floor(i/3),x=64+col*370,yy=y+row*112;ctx.fillStyle='#f4f8fb';roundedRect(ctx,x,yy,340,86,12);ctx.fill();text(ctx,m[0],x+20,yy+30,16,500,'#6c8498');text(ctx,m[1],x+20,yy+64,24,700,'#17324a')});y+=245;ctx.fillStyle='#f8fbfd';roundedRect(ctx,64,y,1112,440,14);ctx.fill();text(ctx,'평면 배치도 (Door → X)',88,y+42,20,700);const bx=100,by=y+82,bw=1040,bh=300,scale=Math.min(bw/container.spec.length,bh/container.spec.width),cw=container.spec.length*scale,ch=container.spec.width*scale,cx=bx+(bw-cw)/2,cy=by+(bh-ch)/2;ctx.strokeStyle='#6c8da7';ctx.lineWidth=3;ctx.strokeRect(cx,cy,cw,ch);container.placements.forEach(p=>{ctx.fillStyle=p.color||'#2f80ed';ctx.globalAlpha=.8;ctx.fillRect(cx+p.x*scale,cy+p.y*scale,Math.max(2,p.length*scale),Math.max(2,p.width*scale));ctx.globalAlpha=1;ctx.strokeStyle='#17324a';ctx.lineWidth=.8;ctx.strokeRect(cx+p.x*scale,cy+p.y*scale,Math.max(2,p.length*scale),Math.max(2,p.width*scale))});y+=475;text(ctx,'외부 배치 화물',64,y,22,700);y+=32;const grouped=groupPlacements(container);grouped.slice(0,16).forEach((g,i)=>{const yy=y+i*38;if(i%2===0){ctx.fillStyle='#f6f9fb';ctx.fillRect(64,yy-25,1112,34)}text(ctx,g.name,78,yy,16,600);text(ctx,g.package,460,yy,15,400,'#58748c');text(ctx,`${g.count}개`,760,yy,15,500);text(ctx,`${g.volume.toFixed(2)} m³`,900,yy,15,500);text(ctx,`${fmtInt(g.weight)} kg`,1158,yy,15,500,'#17324a','right')});y+=Math.min(16,grouped.length)*38+44;if(container.nestedAssignments.length){text(ctx,'내부 빈 공간 활용',64,y,22,700);y+=34;container.nestedAssignments.slice(0,6).forEach((a,i)=>{text(ctx,`${a.hostCargoName} (${a.hostUid})`,78,y+i*36,15,600);text(ctx,`${a.placements.length}개 삽입 · ${a.usedVolumeM3.toFixed(2)} m³ · ${fmtInt(a.usedWeightKg)} kg`,1158,y+i*36,15,400,'#0b8b63','right')});y+=Math.min(6,container.nestedAssignments.length)*36+20}if(container.warnings.length){ctx.fillStyle='#fff6df';roundedRect(ctx,64,Math.min(H-170,y),1112,72,10);ctx.fill();text(ctx,`검토: ${container.warnings.join(' / ')}`,84,Math.min(H-125,y+44),15,600,'#8d681e')}text(ctx,`생성: ${new Date().toLocaleString('ko-KR')} · Container Fit`,64,H-54,14,400,'#7890a2');return canvas}
+function drawReportPage(container,index,total){const W=1240,H=1754,canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);ctx.fillStyle='#0d3153';ctx.fillRect(0,0,W,154);text(ctx,'Container Fit',64,72,38,700,'#fff');text(ctx,'컨테이너 적재 최적화 및 안전성 검증 보고서',64,116,24,500,'#cfe5f7');text(ctx,`${index+1} / ${total}`,1170,84,20,600,'#cfe5f7','right');const r=state.result;let y=205;const score=container.safetyScore||95;const scoreLabel=score>=90?'안전 (출하 적합)':score>=70?'주의 (조건부 적합)':'경고 (재배치 필요)';text(ctx,`Container ${String(container.index).padStart(2,'0')} · ${container.spec.name}`,64,y,30,700);text(ctx,`안전 종합 점수: ${score}점 (${scoreLabel})`,1176,y,20,700,score>=90?'#0b8b63':score>=70?'#b45309':'#b91c1c','right');y+=45;text(ctx,`내측 ${fmtInt(container.spec.length)} × ${fmtInt(container.spec.width)} × ${fmtInt(container.spec.height)} mm  |  문 ${fmtInt(container.spec.doorWidth||0)} × ${fmtInt(container.spec.doorHeight||0)} mm  |  최대 적재중량 ${fmtInt(container.spec.maxPayloadKg)} kg`,64,y,17,400,'#58748c');y+=50;const metrics=[['사용 용적',`${container.usedVolumeM3.toFixed(2)} m³`],['공간 활용률',pct(container.volumeUtilization)],['적재 중량',`${fmtInt(container.usedWeightKg)} kg`],['중량 활용률',pct(container.weightUtilization)],['CG X/Y/Z',`${fmtInt(container.centerOfGravity.x)} / ${fmtInt(container.centerOfGravity.y)} / ${fmtInt(container.centerOfGravity.z)} mm`],['평균 바닥하중',`${fmtInt(container.avgFloorLoadKgM2)} kg/m²`]];metrics.forEach((m,i)=>{const col=i%3,row=Math.floor(i/3),x=64+col*370,yy=y+row*112;ctx.fillStyle='#f4f8fb';roundedRect(ctx,x,yy,340,86,12);ctx.fill();text(ctx,m[0],x+20,yy+30,16,500,'#6c8498');text(ctx,m[1],x+20,yy+64,24,700,'#17324a')});y+=245;ctx.fillStyle='#f8fbfd';roundedRect(ctx,64,y,1112,440,14);ctx.fill();text(ctx,'평면 배치도 (Door → X / 녹색: C.G. 안전 허용 영역)',88,y+42,20,700);const bx=100,by=y+82,bw=1040,bh=300,scale=Math.min(bw/container.spec.length,bh/container.spec.width),cw=container.spec.length*scale,ch=container.spec.width*scale,cx=bx+(bw-cw)/2,cy=by+(bh-ch)/2;ctx.strokeStyle='#6c8da7';ctx.lineWidth=3;ctx.strokeRect(cx,cy,cw,ch);ctx.fillStyle='rgba(16,185,129,0.12)';ctx.fillRect(cx+cw*0.25,cy+ch*0.30,cw*0.50,ch*0.40);ctx.strokeStyle='#10b981';ctx.lineWidth=1.5;ctx.strokeRect(cx+cw*0.25,cy+ch*0.30,cw*0.50,ch*0.40);container.placements.forEach(p=>{ctx.fillStyle=p.color||'#2f80ed';ctx.globalAlpha=.8;ctx.fillRect(cx+p.x*scale,cy+p.y*scale,Math.max(2,p.length*scale),Math.max(2,p.width*scale));ctx.globalAlpha=1;ctx.strokeStyle='#17324a';ctx.lineWidth=.8;ctx.strokeRect(cx+p.x*scale,cy+p.y*scale,Math.max(2,p.length*scale),Math.max(2,p.width*scale))});const cgX=cx+container.centerOfGravity.x*scale,cgY=cy+container.centerOfGravity.y*scale;ctx.fillStyle='#ef4444';ctx.beginPath();ctx.arc(cgX,cgY,6,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();text(ctx,'C.G.',cgX+9,cgY+4,13,700,'#ef4444');y+=475;text(ctx,'외부 배치 화물 및 상차 순서 요약',64,y,22,700);y+=32;const grouped=groupPlacements(container);grouped.slice(0,16).forEach((g,i)=>{const yy=y+i*38;if(i%2===0){ctx.fillStyle='#f6f9fb';ctx.fillRect(64,yy-25,1112,34)}text(ctx,g.name,78,yy,16,600);text(ctx,g.package,460,yy,15,400,'#58748c');text(ctx,`${g.count}개`,760,yy,15,500);text(ctx,`${g.volume.toFixed(2)} m³`,900,yy,15,500);text(ctx,`${fmtInt(g.weight)} kg`,1158,yy,15,500,'#17324a','right')});y+=Math.min(16,grouped.length)*38+44;if(container.nestedAssignments.length){text(ctx,'내부 빈 공간 활용',64,y,22,700);y+=34;container.nestedAssignments.slice(0,6).forEach((a,i)=>{text(ctx,`${a.hostCargoName} (${a.hostUid})`,78,y+i*36,15,600);text(ctx,`${a.placements.length}개 삽입 · ${a.usedVolumeM3.toFixed(2)} m³ · ${fmtInt(a.usedWeightKg)} kg`,1158,y+i*36,15,400,'#0b8b63','right')});y+=Math.min(6,container.nestedAssignments.length)*36+20}if(container.warnings.length){ctx.fillStyle='#fff6df';roundedRect(ctx,64,Math.min(H-170,y),1112,72,10);ctx.fill();text(ctx,`검토 사항: ${container.warnings.join(' / ')}`,84,Math.min(H-125,y+44),15,600,'#8d681e')}text(ctx,`생성: ${new Date().toLocaleString('ko-KR')} · Container Fit 물리/안전 검증 시스템`,64,H-54,14,400,'#7890a2');return canvas}
 function drawSummaryPage(){const W=1240,H=1754,canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);ctx.fillStyle='#0d3153';ctx.fillRect(0,0,W,230);text(ctx,'Container Fit',64,84,42,700,'#fff');text(ctx,'컨테이너 적재 최적화 결과',64,135,28,600,'#fff');text(ctx,`제품 실치수 + 포장 외형 + 내부 빈 공간 + 작업 여유 · ${resultGoalLabel(state.result)}`,64,183,20,400,'#cfe5f7');let y=300;const r=state.result,used=r.containers.reduce((s,c)=>s+c.usedVolumeM3,0),usable=r.containers.reduce((s,c)=>s+c.usableVolumeM3,0),metrics=[['컨테이너',`${r.containers.length}대`],['포장 단위',`${unitCount()}개`],['포장 후 체적',`${totalPackedVolume().toFixed(2)} m³`],['총 출하중량',`${fmtInt(totalWeight())} kg`],['공간 활용률',pct(usable?used/usable:0)],['내부 절감',`${r.nestedSavedVolumeM3.toFixed(2)} m³`],['포장 자중',`${fmtInt(r.packagingWeightKg)} kg`],['미적재',`${r.unpacked.length}개`]];metrics.forEach((m,i)=>{const col=i%4,row=Math.floor(i/4),x=64+col*280,yy=y+row*120;ctx.fillStyle='#f4f8fb';roundedRect(ctx,x,yy,250,92,12);ctx.fill();text(ctx,m[0],x+18,yy+32,15,500,'#6b8497');text(ctx,m[1],x+18,yy+69,23,700)});y+=290;text(ctx,'포장 단위 요약',64,y,24,700);y+=44;state.cargo.slice(0,22).forEach((c,i)=>{const d=packedDimensions(c),yy=y+i*44;if(i%2===0){ctx.fillStyle='#f7fafc';ctx.fillRect(64,yy-28,1112,38)}text(ctx,c.name,76,yy,15,600);text(ctx,c.packaging.label,390,yy,14,400,'#58748c');text(ctx,`${fmtInt(d.length)}×${fmtInt(d.width)}×${fmtInt(d.height)}`,730,yy,14,500);text(ctx,`${c.quantity}개`,920,yy,14,500);text(ctx,`${fmtInt(packedWeightKg(c)*c.quantity)} kg`,1158,yy,14,500,'#17324a','right')});text(ctx,`생성: ${new Date().toLocaleString('ko-KR')} · Container Fit`,64,H-54,14,400,'#7890a2');return canvas}
 async function exportPng(){if(!state.result)return;const canvases=[drawSummaryPage(),...state.result.containers.slice(0,12).map((c,i)=>drawReportPage(c,i,state.result.containers.length))];const W=1240,gap=20,H=canvases.reduce((s,c)=>s+c.height,0)+gap*(canvases.length-1);if(H>30000){toast('컨테이너 수가 많아 PNG는 요약 페이지만 저장합니다. 전체 결과는 PDF 또는 Excel을 사용하세요.','info');const b=await new Promise(res=>canvases[0].toBlob(res,'image/png'));downloadBlob('container-fit-summary.png',b);return}const out=document.createElement('canvas');out.width=W;out.height=H;const ctx=out.getContext('2d');ctx.fillStyle='#e9f0f5';ctx.fillRect(0,0,W,H);let y=0;canvases.forEach(c=>{ctx.drawImage(c,0,y);y+=c.height+gap});const blob=await new Promise(res=>out.toBlob(res,'image/png'));downloadBlob('container-fit-report.png',blob);toast('PNG 결과 이미지를 저장했습니다.','success')}
 function dataUrlBytes(dataUrl){const b64=dataUrl.split(',')[1],bin=atob(b64),out=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);return out}
@@ -371,12 +1206,158 @@ document.addEventListener('click',e=>{
   else if(action==='export-cargo-csv')exportCargoCsv()
   else if(action==='csv-template')csvTemplate()
   else if(action==='toggle-result'){state.openResult=state.openResult===Number(btn.dataset.index)?-1:Number(btn.dataset.index);render();setTimeout(()=>document.querySelectorAll('.container-result')[Number(btn.dataset.index)]?.scrollIntoView({block:'nearest'}),30)}
+  else if(action==='container-tab'){
+    const tab=btn.dataset.tab, cIdx=Number(btn.dataset.container)
+    state.containerTabs[cIdx]=tab
+    render()
+  }
   else if(action==='view-mode'){state.viewMode=id;render()}
+  else if(action==='toggle-layer'){
+    const layer=btn.dataset.layer
+    state.layers[layer]=!state.layers[layer]
+    render()
+  }
+  else if(action==='orbit-preset'){
+    const preset=btn.dataset.id, cIdx=Number(btn.dataset.container)
+    const viewer=viewersMap.get(cIdx)
+    if(viewer) viewer.resetView(preset)
+  }
+  else if(action==='step-first'){
+    const cIdx=Number(btn.dataset.container)
+    state.containerSteps[cIdx]=0
+    render()
+  }
+  else if(action==='step-prev'){
+    const cIdx=Number(btn.dataset.container)
+    const cur=state.containerSteps[cIdx]??-1
+    state.containerSteps[cIdx]=Math.max(0, cur-1)
+    render()
+  }
+  else if(action==='step-next'){
+    const cIdx=Number(btn.dataset.container)
+    const container=state.result?.containers?.find(c=>c.index===cIdx)
+    const maxStep=Math.max(0,(container?.loadingSequence?.length||1)-1)
+    const cur=state.containerSteps[cIdx]??-1
+    state.containerSteps[cIdx]=Math.min(maxStep, cur+1)
+    render()
+  }
+  else if(action==='step-all'){
+    const cIdx=Number(btn.dataset.container)
+    state.containerSteps[cIdx]=-1
+    render()
+  }
+  else if(action==='step-play-toggle'){
+    const cIdx=Number(btn.dataset.container)
+    const container=state.result?.containers?.find(c=>c.index===cIdx)
+    const maxStep=Math.max(0,(container?.loadingSequence?.length||1)-1)
+    if(state.isPlayingStep){
+      if(stepPlayerTimer){clearInterval(stepPlayerTimer);stepPlayerTimer=null}
+      state.isPlayingStep=false
+      render()
+    } else {
+      state.isPlayingStep=true
+      if((state.containerSteps[cIdx]??-1)>=maxStep||(state.containerSteps[cIdx]??-1)===-1){
+        state.containerSteps[cIdx]=0
+      }
+      render()
+      if(stepPlayerTimer) clearInterval(stepPlayerTimer)
+      stepPlayerTimer=setInterval(()=>{
+        const cur=state.containerSteps[cIdx]??0
+        if(cur>=maxStep){
+          clearInterval(stepPlayerTimer)
+          stepPlayerTimer=null
+          state.isPlayingStep=false
+          state.containerSteps[cIdx]=-1
+          render()
+        } else {
+          state.containerSteps[cIdx]=cur+1
+          render()
+        }
+      }, 650)
+    }
+  }
+  else if(action==='clear-selected-cargo'){
+    state.selectedPlacement=null
+    render()
+  }
+  else if(action==='open-manual'){
+    state.modal={type:'manual'}
+    if(btn.dataset.tab) state.manualTab=btn.dataset.tab
+    render()
+  }
+  else if(action==='manual-tab'){
+    state.manualTab=id
+    render()
+  }
+  else if(action==='load-sample'){
+    loadSampleProject(id)
+  }
+  else if(action==='toggle-maximize'){
+    const cIdx=Number(btn.dataset.container)
+    state.maximizedContainer = state.maximizedContainer === cIdx ? null : cIdx
+    render()
+  }
+  else if(action==='clear-seq-filter'){
+    state.seqFilter=''
+    render()
+  }
+  else if(action==='jump-to-step'){
+    const cIdx=Number(btn.dataset.container), step=Number(btn.dataset.step), uid=btn.dataset.uid
+    state.containerSteps[cIdx]=step
+    state.containerTabs[cIdx]='viewer'
+    const container=state.result?.containers?.find(c=>c.index===cIdx)
+    if(uid&&container) state.selectedPlacement=container.placements.find(p=>p.uid===uid)||null
+    render()
+    setTimeout(()=>{ document.querySelectorAll('.container-result')[cIdx]?.scrollIntoView({behavior:'smooth',block:'nearest'}) }, 40)
+  }
   else if(action==='export-result-json')exportResultJson()
   else if(action==='export-result-csv')exportResultCsv()
   else if(action==='export-xlsx')exportXlsx()
   else if(action==='export-png')exportPng()
   else if(action==='export-pdf')exportPdf()
+})
+
+document.addEventListener('input', e=>{
+  const search=e.target.closest('.seq-search-input')
+  if(search){
+    state.seqFilter=search.value
+    const cIdx=Number(search.dataset.container)
+    const container=state.result?.containers?.find(c=>c.index===cIdx)
+    if(container){
+      const filter=search.value.trim().toLowerCase()
+      const seq=container.loadingSequence||[]
+      const rows=search.closest('.sequence-panel')?.querySelectorAll('.seq-table tbody tr')
+      let count=0
+      rows?.forEach(tr=>{
+        const text=tr.textContent.toLowerCase()
+        const match=!filter||text.includes(filter)
+        tr.style.display=match?'':'none'
+        if(match) count++
+      })
+      const info=search.closest('.sequence-panel')?.querySelector('.seq-filter-info')
+      if(info) info.textContent=`표시: ${count} / 총 ${seq.length}개 단위`
+    }
+  }
+  const slider=e.target.closest('.step-slider')
+  if(slider){
+    const cIdx=Number(slider.dataset.container)
+    const val=Number(slider.value)
+    state.containerSteps[cIdx]=val
+    const v=viewersMap.get(cIdx)
+    if(v) v.setStep(val)
+    const container=state.result?.containers?.find(c=>c.index===cIdx)
+    const seq=container?.loadingSequence||[]
+    const bar=slider.closest('.step-player-bar')
+    const badge=bar?.querySelector('.step-badge')
+    const info=bar?.querySelector('.step-info-text')
+    if(badge) badge.textContent = val === -1 ? `전체 적재 (${seq.length}개)` : `Step ${val + 1} / ${seq.length}`
+    if(info){
+      const active = (val >= 0 && val < seq.length) ? seq[val] : null
+      info.innerHTML = active
+        ? `<b>${esc(active.cargoName)}</b> (${active.length}×${active.width}×${active.height}mm, ${active.weightKg}kg) → 위치: X=${Math.round(active.x)}, Y=${Math.round(active.y)}, Z=${Math.round(active.z)}`
+        : '전체 화물이 적재된 상태입니다.'
+    }
+  }
 })
 
 document.addEventListener('change',e=>{
