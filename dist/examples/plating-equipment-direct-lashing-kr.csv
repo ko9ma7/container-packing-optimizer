@@ -1,0 +1,28 @@
+﻿name,length,width,height,weightKg,quantity,packagingType,packAddLength,packAddWidth,packAddHeight,packTareWeight,packMemo,overrideOuter,outerLength,outerWidth,outerHeight,orientationMode,stackRole,maxStackLayers,sameCargoStackOnly,canBeNested,color,innerEnabled,innerLength,innerWidth,innerHeight,innerAccess,innerMaxPayload
+권취기-1 (Recoiler-1),1600,1200,1630,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#2f80ed,false,,,,top,0
+권취기-2 (Recoiler-2),1600,1200,1630,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#0f9f83,false,,,,top,0
+권취 아큐뮬레이터 (Recoiler Accumulator),3300,1460,1100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#f2994a,false,,,,top,0
+언코일러-1 (Uncoiler-1),1700,1100,1630,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#9b51e0,false,,,,top,0
+언코일러-2 (Uncoiler-2),1700,1100,1630,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#eb5757,false,,,,top,0
+언코일러 아큐뮬레이터 (Uncoiler Accumulator),3600,1900,1100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#27ae60,false,,,,top,0
+제어반 (CP Control Panel),1150,500,2100,0,1,bare,0,0,0,0,,false,,,,all,none,1,false,false,#2d9cdb,false,,,,top,0
+블로워 송풍기 (Blower),1460,800,1400,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#f2c94c,false,,,,top,0
+도금라인 섹션-1 (Plating Line Section-1),2000,1800,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#56ccf2,false,,,,top,0
+도금라인 섹션-2 (Plating Line Section-2),970,1800,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#6fcf97,false,,,,top,0
+도금라인 섹션-3 (Plating Line Section-3),2370,1800,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#bb6bd9,false,,,,top,0
+도금라인 섹션-4 (Plating Line Section-4),1900,1600,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#e056fd,false,,,,top,0
+도금라인 섹션-5 (Plating Line Section-5),2200,1850,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#30336b,false,,,,top,0
+도금라인 섹션-6 (Plating Line Section-6),2800,2100,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#130f40,false,,,,top,0
+도금라인 섹션-7 (Plating Line Section-7),1600,2250,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#009432,false,,,,top,0
+도금라인 섹션-8 (Plating Line Section-8),3000,1800,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#0652dd,false,,,,top,0
+도금라인 섹션-9 (Plating Line Section-9),3000,1800,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#1289a5,false,,,,top,0
+도금라인 섹션-10 (Plating Line Section-10),3000,1800,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#b53471,false,,,,top,0
+도금라인 섹션-11 (Plating Line Section-11),1400,2050,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#ee5a24,false,,,,top,0
+도금라인 섹션-12 (Plating Line Section-12),2100,1950,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#009432,false,,,,top,0
+도금라인 섹션-13 (Plating Line Section-13),2200,1950,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#ea2027,false,,,,top,0
+도금라인 섹션-14 (Plating Line Section-14),2100,1950,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#1e3799,false,,,,top,0
+도금라인 섹션-15 (Plating Line Section-15),2100,1950,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#38ada9,false,,,,top,0
+도금라인 섹션-16 (Plating Line Section-16),2300,1950,2100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#e58e26,false,,,,top,0
+도금라인 섹션-17 (Plating Line Section-17),4100,760,1100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#78e08f,false,,,,top,0
+여과기-1 (Filter-1),500,1200,1100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#60a3bc,false,,,,top,0
+여과기-2 (Filter-2),500,1200,1100,0,1,bare,0,0,0,0,,false,,,,upright,none,1,false,false,#4a69bd,false,,,,top,0

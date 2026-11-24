@@ -113,6 +113,44 @@ console.log('\n[Test Group 6] 무게중심(C.G.) 계산 및 ISO 1496 안전 기�
   assert(ny >= 0.30 && ny <= 0.70, `Y축 무게중심이 중앙 40% 안전 영역 내부임 (현재: ${(ny*100).toFixed(1)}%)`)
 }
 
+// 7. 웹공유 URL 인코딩·압축·디코딩 및 무손실 복원 검증
+console.log('\n[Test Group 7] 웹공유 URL 인코딩·압축·디코딩 무손실 복원 검증')
+{
+  function bytesToBase64Url(u8){let s='';for(let i=0;i<u8.length;i++)s+=String.fromCharCode(u8[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
+  function base64UrlToBytes(str){let b64=str.replace(/-/g,'+').replace(/_/g,'/');while(b64.length%4)b64+='=';const binary=atob(b64);const bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);return bytes}
+
+  async function encodeProjectToUrlToken(projectObj){
+    const jsonStr=JSON.stringify(projectObj)
+    const rawBytes=new TextEncoder().encode(jsonStr)
+    const stream=new Blob([rawBytes]).stream().pipeThrough(new CompressionStream('deflate'))
+    const buf=await new Response(stream).arrayBuffer()
+    return 'z_'+bytesToBase64Url(new Uint8Array(buf))
+  }
+
+  async function decodeProjectFromUrlToken(token){
+    const prefix=token.slice(0,2),data=token.slice(2)
+    const bytes=base64UrlToBytes(data)
+    if(prefix==='z_'){
+      const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'))
+      const buf=await new Response(stream).arrayBuffer()
+      return JSON.parse(new TextDecoder().decode(new Uint8Array(buf)))
+    }
+    throw new Error('Unknown prefix')
+  }
+
+  const project = JSON.parse(fs.readFileSync(new URL('../examples/user-cad-block-v7.json', import.meta.url), 'utf8'))
+  project.autoCalc = true
+
+  const token = await encodeProjectToUrlToken(project)
+  assert(token.startsWith('z_'), 'Deflate 고압축 z_ 접두사 토큰 생성 성공')
+  assert(token.length < 2000, `압축 토큰 길이 제한 충족 (${token.length} chars < 2,000자)`)
+
+  const restored = await decodeProjectFromUrlToken(token)
+  assert(restored.autoCalc === true, '수신자 브라우저 3D 자동 계산(autoCalc) 플래그 보존 확인')
+  assert(restored.cargo.length === project.cargo.length, `화물 품목 수 정확 일치 (${restored.cargo.length}종)`)
+  assert(JSON.stringify(restored.cargo[0]) === JSON.stringify(project.cargo[0]), '화물 1번 상세 사양 및 치수 무손실 복원 일치')
+}
+
 console.log(`\n========================================`)
 console.log(`🎉 모든 검증 테스트 통과! (${passedTests} / ${totalTests} Passed)`)
 console.log(`========================================`)
